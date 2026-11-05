@@ -2,6 +2,23 @@
 
 Ovo je **Android izvorni projekt**, s interaktivnim `www/index.html` pregledom i vlastitim native Java pluginom. Nije gotov APK: potrebno ga je sastaviti pomoću Android SDK-a ili GitHub Actions. Nije testiran na stvarnom Android uređaju u ovom okruženju.
 
+## Šta je novo u v4 (popravka praznog sefa)
+
+- Dok se MP4 šifrira, prikazuje se **Spremanje u sef**; više ne javlja uspjeh prije završetka.
+- Ako servis ne uspije pokrenuti snimanje, završiti MP4 ili sačuvati šifrirani zapis, greška se prikazuje na početnoj i u sefu.
+- Ako šifriranje ili zapis indeksa ne uspije, postojeći privremeni MP4 se **čuva** umjesto automatskog brisanja.
+- Sef automatski vraća u listu kompletne `.svr` fajlove koji su ostali izvan `records.json` zbog prekida procesa.
+- U sefu je tipka **Provjeri i obnovi pronađene snimke**. Pokušava uvesti kompletne privremene MP4-ove iz interne memorije; ne može oporaviti neispravno završene videozapise.
+- Finalizacija MP4-a radi dok su površine kamere/ekrana još žive. Bez rekompresije pri spremanju ili izvozu.
+
+### Važno: nadogradnja i spašavanje postojećih zapisa
+
+**Nemoj deinstalirati postojeću aplikaciju niti brisati njene podatke.** Enkripcija koristi Android Keystore; deinstalacija može trajno uništiti ključ i zapise. GitHub-hosted buildovi obično koriste novi debug potpis po izvođenju. Ako Android odbije novu verziju zbog različitog potpisa, nemoj deinstalirati staru. Za buduće ponovljive instalacije koristi isti signing key (`CALCULATOR_DEBUG_KEYSTORE_B64` repo secret); key mora biti identičan *onom korištenom za trenutno instalirani APK* da bi ažuriranje bez brisanja podataka radilo. Ako originalni debug ključ nije sačuvan, build se možda neće moći instalirati kao nadogradnja.
+
+V4 ne može povratiti sirove snimke koje je ranija verzija već obrisala niti datoteke uništene Android force-stopom. Snimci ostaju privatni i nisu dostupni drugim aplikacijama bez izvoza.
+
+Za dijagnostiku: snimaj 10–15 sekundi, zaustavi, sačekaj da prođe **Spremanje u sef**, otvori sef i provjeri poruku greške. Ako nema zapisa, klikni **Provjeri i obnovi pronađene snimke**. Pošalji prikazanu grešku ili Android Logcat tag `VideoRecorder`.
+
 ## Funkcije
 
 - Kalkulator kao početni ekran i kao ikonica aplikacije; `73 + 27 =` otvara privatnu navigaciju. Izraz se može promijeniti u postavkama. **Ovo nije snažan oblik autentifikacije**; za ozbiljnu zaštitu podataka potreban je zaseban PIN/biometrija.
