@@ -3,6 +3,7 @@ package com.privacystudio.calculator;
 import android.content.ContentValues;
 import android.content.Context;
 import android.net.Uri;
+import android.media.MediaMetadataRetriever;
 import android.os.Build;
 import android.provider.MediaStore;
 import android.security.keystore.KeyGenParameterSpec;
@@ -23,6 +24,8 @@ import java.io.DataInputStream;
 import java.security.KeyStore;
 import java.security.SecureRandom;
 import java.util.UUID;
+import java.util.HashSet;
+import java.util.Set;
 
 import javax.crypto.Cipher;
 import javax.crypto.CipherInputStream;
@@ -33,6 +36,8 @@ import javax.crypto.spec.GCMParameterSpec;
 
 /** App-private AES-256-GCM encrypted MP4 storage. No media scanner calls for vault files. */
 public final class RecorderStore {
+    // Every RecorderStore instance must serialize index updates on the same lock.
+    private static final Object INDEX_LOCK = new Object();
     private static final String KEY_NAME = "private_video_vault_key_v1";
     private static final byte[] MAGIC = new byte[]{'S','V','R','1'};
     private final Context context;
@@ -78,9 +83,32 @@ public final class RecorderStore {
             tmp.delete();
         }
     }
-    public synchronized JSONArray list()throws Exception{return readIndex();}
+    /** Safely expose encrypted .svr files even if a previous index write was interrupted. */
+    private JSONArray repairIndex()throws Exception {
+        synchronized(INDEX_LOCK){
+            JSONArray found=readIndex();
+            Set<String> ids=new HashSet<>();
+            for(int i=0;i<found.length();i++) ids.add(found.getJSONObject(i).optString("id"));
+            File[] encrypted=vault.listFiles((dir,name)->name.endsWith(".svr"));
+            boolean changed=false;
+            if(encrypted!=null) for(File file:encrypted){
+                String id=file.getName().substring(0,file.getName().length()-4);
+                if(ids.contains(id)) continue;
+                JSONObject record=new JSONObject();
+                record.put("id",id);record.put("name","RECOVERED_"+file.lastModified()+".mp4");
+                record.put("type","recovered");record.put("lens","unknown");
+                record.put("durationSec",0);record.put("createdAt",file.lastModified());
+                record.put("width",0);record.put("height",0);
+                record.put("sizeBytes",Math.max(0L,file.length()-32L));
+                found.put(record);ids.add(id);changed=true;
+            }
+            if(changed)writeIndex(found);
+            return found;
+        }
+    }
+    public JSONArray list()throws Exception{return repairIndex();}
     public synchronized JSONObject find(String id)throws Exception {
-        JSONArray records=readIndex();
+        JSONArray records=repairIndex();
         for(int i=0;i<records.length();i++){
             JSONObject f=records.getJSONObject(i);
             if(f.optString("id").equals(id))return f;
@@ -100,12 +128,14 @@ public final class RecorderStore {
             outer.write(MAGIC);outer.write(iv);
             try(CipherOutputStream encrypted=new CipherOutputStream(outer,cipher)){copy(in,encrypted);}
         }catch(Exception e){temp.delete();throw e;}
-        if(!temp.renameTo(destination)){temp.delete();throw new IllegalStateException("Nije moguće spremiti šifrirani zapis.");}
         String name=("screen".equals(type)?"SCREEN_":"CAM_")+new java.text.SimpleDateFormat("yyyy-MM-dd_HH-mm-ss",java.util.Locale.ROOT).format(new java.util.Date(createdAt))+".mp4";
         JSONObject record=new JSONObject();record.put("id",id);record.put("name",name);record.put("type",type);record.put("lens",lens);record.put("durationSec",duration);record.put("createdAt",createdAt);record.put("width",width);record.put("height",height);record.put("sizeBytes",raw.length());
-        JSONArray arr=readIndex();JSONArray next=new JSONArray();next.put(record);
-        for(int i=0;i<arr.length();i++)next.put(arr.get(i));
-        writeIndex(next);
+        synchronized(INDEX_LOCK){
+            if(!temp.renameTo(destination)){temp.delete();throw new IllegalStateException("Nije moguće spremiti šifrirani zapis.");}
+            JSONArray arr=readIndex();JSONArray next=new JSONArray();next.put(record);
+            for(int i=0;i<arr.length();i++)next.put(arr.get(i));
+            writeIndex(next);
+        }
         return record;
     }
     private void decryptTo(String id,OutputStream out)throws Exception {
@@ -147,6 +177,39 @@ public final class RecorderStore {
             context.getContentResolver().update(uri,ready,null,null);
             return name;
         }catch(Exception e){context.getContentResolver().delete(uri,null,null);throw e;}
+    }
+    /** Recover finalized raw MP4 files left after previous encryption/index failures.
+     * This is deliberately explicit, not invoked during every background poll. */
+    public JSONObject recoverPending()throws Exception {
+        File pending=new File(context.getFilesDir(),"capture_pending");
+        File[] candidates=pending.listFiles((dir,name)->name.startsWith("capture_")&&name.endsWith(".tmp"));
+        int recovered=0,invalid=0;
+        if(candidates!=null)for(File file:candidates){
+            if(!file.isFile()||file.length()<1024){invalid++;continue;}
+            MediaMetadataRetriever reader=new MediaMetadataRetriever();
+            try{
+                reader.setDataSource(file.getAbsolutePath());
+                String video=reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO);
+                if(!"yes".equalsIgnoreCase(video)){invalid++;continue;}
+                String duration=reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
+                String width=reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH);
+                String height=reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT);
+                long ms=duration==null?0:Long.parseLong(duration);
+                int w=width==null?0:Integer.parseInt(width);
+                int h=height==null?0:Integer.parseInt(height);
+                long createdAt=file.lastModified();
+                try {createdAt=Long.parseLong(file.getName().replace("capture_", "").replace(".tmp", ""));}
+                catch(NumberFormatException ignored){}
+                // Metadata isn't available for older orphan files; mark origin unknown.
+                encryptRecording(file,"recovered","unknown",createdAt,Math.max(1,ms/1000),w,h);
+                if(!file.delete())android.util.Log.w("RecorderStore","Could not delete recovered raw video");
+                recovered++;
+            }catch(Exception e){
+                invalid++;android.util.Log.e("RecorderStore","Pending video recovery failed: "+file.getName(),e);
+            }finally{reader.release();}
+        }
+        JSONObject result=new JSONObject();result.put("recovered",recovered);result.put("remaining",invalid);
+        return result;
     }
     public synchronized void deleteAll()throws Exception {
         JSONArray all=readIndex();

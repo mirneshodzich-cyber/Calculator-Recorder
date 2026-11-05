@@ -31,7 +31,7 @@ public class SecureRecorderPlugin extends Plugin {
     private final ExecutorService background=Executors.newSingleThreadExecutor();
     @PluginMethod public void status(PluginCall call) {
         try {
-            call.resolve(JSObject.fromJSONObject(RecorderService.status()));
+            call.resolve(JSObject.fromJSONObject(RecorderService.status(getContext())));
         } catch (org.json.JSONException e) {
             call.reject("Ne mogu očitati status snimanja: " + e.getMessage());
         }
@@ -106,6 +106,13 @@ public class SecureRecorderPlugin extends Plugin {
             String name=new RecorderStore(getContext()).export(id);
             JSObject out=new JSObject();out.put("name",name);call.resolve(out);
         }catch(Exception e){call.reject("Izvoz nije uspio: "+e.getMessage());}});
+    }
+    @PluginMethod public void recover(PluginCall call){
+        if(RecorderService.busy()){call.reject("Pričekaj dok snimanje i spremanje ne završe.");return;}
+        background.execute(()->{
+            try{call.resolve(JSObject.fromJSONObject(new RecorderStore(getContext()).recoverPending()));}
+            catch(Exception e){call.reject("Obnova snimaka nije uspjela: "+e.getMessage());}
+        });
     }
     @PluginMethod public void deleteAll(PluginCall call){
         if(RecorderService.busy()){call.reject("Zaustavi snimanje prije brisanja.");return;}

@@ -48,6 +48,7 @@ public class RecorderService extends Service {
     public static final String STOP="com.privacystudio.calculator.STOP";
     private static final String CHANNEL="camera_capture_active";
     private static final String TAG="VideoRecorder";
+    private static final String PREFS="video_recorder_state_v4";
     private static final int NOTIFY_ID=2401;
     private static final long IDLE_MS=20L*60L*1000L;
     private static volatile RecorderService instance;
@@ -76,20 +77,39 @@ public class RecorderService extends Service {
         if(active||preparing)handler.postDelayed(this,5000);
     }};
 
-    public static JSONObject status(){JSONObject o=new JSONObject();try{
-        o.put("recording",active||preparing);o.put("preparing",preparing);
-        o.put("startedAt",startedAt);o.put("mode",currentMode);
-        if(instance!=null)o.put("idleSecondsLeft",Math.max(0,(IDLE_MS-(SystemClock.elapsedRealtime()-instance.lastInteraction))/1000));
-    }catch(Exception ignored){}return o;}
+    public static JSONObject status(Context c){
+        JSONObject o=new JSONObject();try{
+            o.put("recording",active||preparing);o.put("preparing",preparing);
+            o.put("saving",instance!=null&&instance.finishing);
+            o.put("phase",instance!=null&&instance.finishing?"saving":preparing?"preparing":active?"recording":"idle");
+            o.put("startedAt",startedAt);o.put("mode",currentMode);
+            android.content.SharedPreferences state=c.getSharedPreferences(PREFS,MODE_PRIVATE);
+            o.put("lastError",state.getString("lastError",""));
+            o.put("lastSavedAt",state.getLong("lastSavedAt",0));
+            o.put("lastSavedName",state.getString("lastSavedName",""));
+            File dir=new File(c.getFilesDir(),"capture_pending");
+            File[] files=dir.listFiles((d,name)->name.endsWith(".tmp"));
+            o.put("unprocessedFiles",files==null?0:files.length);
+            if(instance!=null)o.put("idleSecondsLeft",Math.max(0,(IDLE_MS-(SystemClock.elapsedRealtime()-instance.lastInteraction))/1000));
+        }catch(Exception ignored){}return o;
+    }
+    private void setError(String message,Throwable cause){
+        Log.e(TAG,message,cause);
+        getSharedPreferences(PREFS,MODE_PRIVATE).edit().putString("lastError",message+(cause==null?"":": "+cause.getMessage())).apply();
+    }
+    private void saveSuccess(JSONObject record){
+        getSharedPreferences(PREFS,MODE_PRIVATE).edit().putString("lastError","")
+            .putLong("lastSavedAt",System.currentTimeMillis())
+            .putString("lastSavedName",record.optString("name","Video spremljen"))
+            .apply();
+    }
     public static boolean busy(){return active||preparing||(instance!=null&&instance.finishing);}
     public static void userInteracted(){RecorderService s=instance;if(s!=null)s.lastInteraction=SystemClock.elapsedRealtime();}
     public static void appVisible(boolean visible){RecorderService s=instance;if(s!=null&&visible)s.lastInteraction=SystemClock.elapsedRealtime();}
     @Override public void onCreate(){
         super.onCreate();instance=this;makeChannel();
-        // Never leave plaintext orphan temp files from a terminated previous process.
-        File pending=new File(getFilesDir(),"capture_pending");
-        File[] stale=pending.listFiles();
-        if(stale!=null)for(File f:stale)if(f.getName().endsWith(".tmp"))f.delete();
+        // Preserve orphan temporary files: they may contain recoverable MP4s.
+        // Vault -> "Obnovi pronađene snimke" validates and imports them.
         new RecorderStore(this).purgePreviews();
     }
     @Override public IBinder onBind(Intent intent){return null;}
@@ -99,6 +119,7 @@ public class RecorderService extends Service {
         if(STOP.equals(action)){finish();return START_NOT_STICKY;}
         if(!CAMERA.equals(action)&&!SCREEN.equals(action))return START_NOT_STICKY;
         if(active||preparing||finishing)return START_NOT_STICKY;
+        getSharedPreferences(PREFS,MODE_PRIVATE).edit().putString("lastError","").apply();
         preparing=true;currentMode=CAMERA.equals(action)?"camera":"screen";
         startedAt=System.currentTimeMillis();lastInteraction=SystemClock.elapsedRealtime();
         lens=intent.getStringExtra("lens")==null?"back":intent.getStringExtra("lens");
@@ -110,7 +131,7 @@ public class RecorderService extends Service {
             handler.removeCallbacks(watchdog);handler.postDelayed(watchdog,5000);
             if(CAMERA.equals(action))beginCamera(generation);
             else beginScreen(intent);
-        }catch(Exception e){Log.e(TAG,"Cannot start capture",e);finish();}
+        }catch(Exception e){setError("Pokretanje snimanja nije uspjelo",e);finish();}
         return START_NOT_STICKY;
     }
     private void makeChannel(){
@@ -131,7 +152,9 @@ public class RecorderService extends Service {
                 .setContentIntent(pending).setOngoing(true).setOnlyAlertOnce(true).setShowWhen(false).build();
         if(Build.VERSION.SDK_INT>=29){
             int type=screen?ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION:
-                (ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA|ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA;
+            if(!screen && checkSelfPermission(Manifest.permission.RECORD_AUDIO)==PackageManager.PERMISSION_GRANTED)
+                type|=ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
             startForeground(NOTIFY_ID,notification,type);
         } else startForeground(NOTIFY_ID,notification);
         foregoundShown=true;
@@ -191,14 +214,14 @@ public class RecorderService extends Service {
                             if(!preparing||generation!=g){session.close();return;}
                             cameraSession=session;
                             try{session.setRepeatingRequest(request.build(),null,handler);recorder.start();active=true;preparing=false;startedAt=System.currentTimeMillis();}
-                            catch(Exception e){Log.e(TAG,"Cannot start camera recording",e);finish();}
+                            catch(Exception e){setError("Kamera nije počela snimati",e);finish();}
                         }
-                        @Override public void onConfigureFailed(CameraCaptureSession session){Log.e(TAG,"Camera session configuration failed");finish();}
+                        @Override public void onConfigureFailed(CameraCaptureSession session){setError("Kamera nije uspjela podesiti sesiju",null);finish();}
                     },handler);
-                }catch(Exception e){Log.e(TAG,"Camera session error",e);finish();}
+                }catch(Exception e){setError("Greška kamere",e);finish();}
             }
             @Override public void onDisconnected(CameraDevice dev){dev.close();finish();}
-            @Override public void onError(CameraDevice dev,int err){dev.close();Log.e(TAG,"Camera error "+err);finish();}
+            @Override public void onError(CameraDevice dev,int err){dev.close();setError("Kamera je prijavila grešku "+err,null);finish();}
         },handler);
     }
     @SuppressWarnings("deprecation")
@@ -231,20 +254,36 @@ public class RecorderService extends Service {
         final String usedLens=lens;
         final int w=frameWidth,h=frameHeight;
         File pending=rawFile;rawFile=null;
-        if(cameraSession!=null){try{cameraSession.stopRepeating();}catch(Exception ignored){}try{cameraSession.close();}catch(Exception ignored){}cameraSession=null;}
+        if(cameraSession!=null){try{cameraSession.stopRepeating();}catch(Exception ignored){}}
+        // Finalize MP4 while camera/display surfaces are still available.
+        if(recorder!=null){
+            try{if(hadVideo)recorder.stop();}
+            catch(RuntimeException e){hadVideo=false;setError("MP4 nije moguće završiti; pokušaj snimati barem 5 sekundi",e);}
+            try{recorder.reset();recorder.release();}catch(Exception ignored){}recorder=null;
+        }
+        if(cameraSession!=null){try{cameraSession.close();}catch(Exception ignored){}cameraSession=null;}
         if(camera!=null){try{camera.close();}catch(Exception ignored){}camera=null;}
         if(virtualDisplay!=null){virtualDisplay.release();virtualDisplay=null;}
         MediaProjection previousProjection=projection;projection=null;
         if(previousProjection!=null){try{previousProjection.stop();}catch(Exception ignored){}}
-        if(recorder!=null){try{if(hadVideo)recorder.stop();}catch(RuntimeException e){hadVideo=false;Log.w(TAG,"Clip too short or failed to finalize",e);}try{recorder.reset();recorder.release();}catch(Exception ignored){}recorder=null;}
         final boolean valid=hadVideo;final long sec=Math.max(1,(System.currentTimeMillis()-when)/1000);
         if(pending!=null&&pending.exists()&&pending.length()>1024&&valid){
             io.execute(()->{
-                try{new RecorderStore(this).encryptRecording(pending,type,usedLens,when,sec,w,h);}
-                catch(Exception e){Log.e(TAG,"Encryption/save failed",e);}
-                finally{pending.delete();handler.post(()->{stopForegroundSafe();finishing=false;stopSelf();});}
+                try{
+                    JSONObject record=new RecorderStore(this).encryptRecording(pending,type,usedLens,when,sec,w,h);
+                    saveSuccess(record);
+                    if(!pending.delete())Log.w(TAG,"Saved MP4 but raw file could not be deleted");
+                }catch(Exception e){
+                    // Do not destroy a valid raw MP4 when index/encryption fails.
+                    setError("Šifriranje ili spremanje nije uspjelo; original je sačuvan za oporavak",e);
+                }finally{handler.post(()->{stopForegroundSafe();finishing=false;stopSelf();});}
             });
-        }else{if(pending!=null)pending.delete();stopForegroundSafe();finishing=false;stopSelf();}
+        }else{
+            if(getSharedPreferences(PREFS,MODE_PRIVATE).getString("lastError","").isEmpty())
+                setError("Snimanje nije proizvelo ispravan MP4. Provjeri dozvole i probaj 10 sekundi.",null);
+            // Keep any raw output for diagnosis / potential recovery.
+            stopForegroundSafe();finishing=false;stopSelf();
+        }
     }
     private void stopForegroundSafe(){if(foregoundShown){if(Build.VERSION.SDK_INT>=24)stopForeground(STOP_FOREGROUND_REMOVE);else stopForeground(true);foregoundShown=false;}}
     @Override public void onTaskRemoved(Intent rootIntent){
