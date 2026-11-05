@@ -8,6 +8,6 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(SecureRecorderPlugin.class);
         super.onCreate(savedInstanceState);
     }
-    @Override protected void onStart(){super.onStart();RecorderService.appVisible(true);}
-    @Override protected void onStop(){RecorderService.appVisible(false);super.onStop();}
+    @Override public void onStart(){super.onStart();RecorderService.appVisible(true);}
+    @Override public void onStop(){RecorderService.appVisible(false);super.onStop();}
 }
