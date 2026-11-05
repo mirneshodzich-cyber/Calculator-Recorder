@@ -29,7 +29,13 @@ import java.util.concurrent.Executors;
 })
 public class SecureRecorderPlugin extends Plugin {
     private final ExecutorService background=Executors.newSingleThreadExecutor();
-    @PluginMethod public void status(PluginCall call){call.resolve(JSObject.fromJSONObject(RecorderService.status()));}
+    @PluginMethod public void status(PluginCall call) {
+        try {
+            call.resolve(JSObject.fromJSONObject(RecorderService.status()));
+        } catch (org.json.JSONException e) {
+            call.reject("Ne mogu očitati status snimanja: " + e.getMessage());
+        }
+    }
     @PluginMethod public void touch(PluginCall call){RecorderService.userInteracted();call.resolve();}
 
     @PluginMethod public void startCamera(PluginCall call){
