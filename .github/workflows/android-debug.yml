@@ -18,6 +18,18 @@ jobs:
           distribution: temurin
           java-version: '21'
       - uses: android-actions/setup-android@v4
+      # For repeatable APK updates, save your own debug keystore as a base64
+      # GitHub secret CALCULATOR_DEBUG_KEYSTORE_B64. Without it, runners create
+      # a new debug signing key, and Android may reject updates to old installs.
+      - name: Restore persistent debug signing key (optional)
+        env:
+          DEBUG_KEYSTORE_B64: ${{ secrets.CALCULATOR_DEBUG_KEYSTORE_B64 }}
+        shell: bash
+        run: |
+          if [[ -n "$DEBUG_KEYSTORE_B64" ]]; then
+            mkdir -p "$HOME/.android"
+            printf '%s' "$DEBUG_KEYSTORE_B64" | base64 --decode > "$HOME/.android/debug.keystore"
+          fi
       - run: npm install
       - run: npx cap add android
       - run: node scripts/install-native.mjs
