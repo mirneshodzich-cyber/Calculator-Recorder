@@ -1,0 +1,7 @@
+{
+  "appId": "com.privacystudio.calculator",
+  "appName": "Calculator",
+  "webDir": "www",
+  "android": {"allowMixedContent": false},
+  "server": {"androidScheme": "https"}
+}
