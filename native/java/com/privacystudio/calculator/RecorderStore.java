@@ -22,7 +22,6 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.DataInputStream;
 import java.security.KeyStore;
-import java.security.SecureRandom;
 import java.util.UUID;
 import java.util.HashSet;
 import java.util.Set;
@@ -130,9 +129,13 @@ public final class RecorderStore {
         String id=UUID.randomUUID().toString();
         File destination=encryptedFile(id);
         File temp=new File(vault,id+".incomplete");
-        byte[] iv=new byte[12];new SecureRandom().nextBytes(iv);
         Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");
-        cipher.init(Cipher.ENCRYPT_MODE,key(),new GCMParameterSpec(128,iv));
+        // AndroidKeyStore forbids caller-supplied IVs during ENCRYPT_MODE.
+        // Let the provider generate a fresh IV, then persist it in the SVR1 header.
+        cipher.init(Cipher.ENCRYPT_MODE,key());
+        byte[] iv=cipher.getIV();
+        if(iv==null||iv.length!=12)
+            throw new java.security.GeneralSecurityException("AndroidKeyStore nije vratio 12-bajtni GCM IV");
         try(OutputStream outer=new BufferedOutputStream(new FileOutputStream(temp));InputStream in=new BufferedInputStream(new FileInputStream(raw))){
             outer.write(MAGIC);outer.write(iv);
             try(CipherOutputStream encrypted=new CipherOutputStream(outer,cipher)){copy(in,encrypted);}
