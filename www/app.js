@@ -33,8 +33,33 @@ function lock(){if(state.transfer){toast('Prvo završi ili prekini obradu snimka
 $('keypad').addEventListener('click',e=>{let b=e.target.closest('[data-key]');if(b)calcPress(b.dataset.key)});
 document.addEventListener('keydown',e=>{if(unlocked||['INPUT','TEXTAREA'].includes(document.activeElement?.tagName))return;let k=e.key;if(/^[0-9.]$/.test(k)||['+','-','*','/','%'].includes(k)){calcPress(k);e.preventDefault()}else if(k==='Enter'||k==='='){calcPress('=');e.preventDefault()}else if(k==='Escape'){calcPress('C');e.preventDefault()}else if(k==='Backspace'){calcPress('DEL');e.preventDefault()}});
 $('calcMenu').onclick=()=>toast('Calculator • privatni prikaz');
-function tab(name){state.tab=name;const labels={home:'Kontrolni centar',vault:'Privatni sef',settings:'Postavke'};for(let k of Object.keys(labels))$('screen'+k[0].toUpperCase()+k.slice(1)).style.display=k===name?'block':'none';$('pageHeading').textContent=labels[name];document.querySelectorAll('.nav-btn').forEach(x=>x.classList.toggle('active',x.dataset.tab===name));if(name==='settings'){$('secretInput').value=state.secret;if(isAndroid())native('getNoticeLabel').then(x=>{$('notificationName').value=x.label||'Calculator'}).catch(()=>{});}if(name==='vault')renderFiles()}
+function tab(name){state.tab=name;const labels={home:'Kontrolni centar',vault:'Privatni sef',settings:'Postavke'};for(let k of Object.keys(labels))$('screen'+k[0].toUpperCase()+k.slice(1)).style.display=k===name?'block':'none';$('pageHeading').textContent=labels[name];document.querySelectorAll('.nav-btn').forEach(x=>x.classList.toggle('active',x.dataset.tab===name));if(name==='settings'){$('secretInput').value=state.secret;if(isAndroid()){native('getNoticeLabel').then(x=>{$('notificationName').value=x.label||'Calculator'}).catch(()=>{});refreshStorageInfo();}}if(name==='vault')renderFiles()}
 document.querySelectorAll('.nav-btn').forEach(x=>x.addEventListener('click',()=>tab(x.dataset.tab)));
+async function refreshStorageInfo(){
+ if(!isAndroid()){ $('storageFolderLabel').textContent='HTML pregled – izbor foldera radi na Androidu';return; }
+ try{
+  const r=await native('storageInfo');
+  $('storageFolderLabel').textContent=r.selected?('Odabran · '+String(r.location||'Dokumenti').slice(-95)):'Nije odabran – snimanje čeka odabir foldera';
+ }catch(e){$('storageFolderLabel').textContent='Ne mogu pristupiti folderu: '+(e.message||e);}
+}
+$('chooseStorageFolder').onclick=async()=>{
+ if(!isAndroid())return toast('Izbor foldera radi samo u Android APK-u.');
+ const b=$('chooseStorageFolder');b.disabled=true;
+ try{await native('chooseStorageFolder');await refreshStorageInfo();toast('Folder je odabran. Novi snimci će se spremati ovdje kao .cjn.');}
+ catch(e){toast('Odabir foldera: '+(e.message||e));}
+ finally{b.disabled=false;}
+};
+$('migrateStorage').onclick=async()=>{
+ if(!isAndroid())return toast('Migracija radi samo u Android APK-u.');
+ if(!confirm('Premjestiti stare šifrirane snimke iz Android/data u odabrani folder? Originali se brišu tek nakon SHA-256 provjere kopije.'))return;
+ const b=$('migrateStorage');b.disabled=true;$('storageProgress').textContent='Premještam i provjeravam stare zapise… Ne zatvaraj aplikaciju.';
+ try{
+  const result=await native('migrateStorage');
+  const message='Premješteno: '+result.moved+' datoteka. Oslobođeno: '+prettyBytes(result.releasedBytes)+'.';
+  $('storageProgress').textContent=message;toast(message);await refresh();await refreshStorageInfo();
+ }catch(e){$('storageProgress').textContent='Premještanje nije dovršeno: '+(e.message||e);toast($('storageProgress').textContent);}
+ finally{b.disabled=false;}
+};
 $('openVaultQuick').onclick=()=>tab('vault');$('seeAll').onclick=()=>tab('vault');$('hideQuick').onclick=lock;$('lockNow').onclick=lock;
 function setMode(m){
  if(state.active||state.preparing||state.saving){toast('Pričekaj završetak snimanja i spremanja.');return}
