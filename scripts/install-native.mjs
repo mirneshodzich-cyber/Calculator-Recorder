@@ -29,6 +29,9 @@ for(const p of permissions){
 if(!manifest.includes('android:name=".RecorderService"')){
  manifest=manifest.replace('</application>',`    <service android:name=".RecorderService" android:exported="false" android:stopWithTask="false" android:foregroundServiceType="camera|microphone|mediaProjection" />\n  </application>`);
 }
+if(!manifest.includes('android:name=".PreviewActivity"')){
+ manifest=manifest.replace('</application>',`    <activity android:name=".PreviewActivity" android:exported="false" android:theme="@android:style/Theme.Material.NoActionBar" />\n  </application>`);
+}
 // Keep the active recording notification visible. No notification stop action.
 manifest=manifest.replace(/android:icon="[^"]+"/,'android:icon="@drawable/ic_calculator"');
 if(!manifest.includes('android:usesCleartextTraffic=')){
