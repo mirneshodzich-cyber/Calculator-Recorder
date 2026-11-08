@@ -2,6 +2,30 @@
 
 Ovo je **Android izvorni projekt**, s interaktivnim `www/index.html` pregledom i vlastitim native Java pluginom. Nije gotov APK: potrebno ga je sastaviti pomoću Android SDK-a ili GitHub Actions. Nije testiran na stvarnom Android uređaju u ovom okruženju.
 
+## v5: Dijagnostika problema sa spremanjem
+
+**Nije potvrđeno da je ovim riješen svaki kvar na svim Android uređajima.** Ovo izdanje adresira konkretne probleme pronađene statičkom analizom v4 i daje jasne rezultate testiranja:
+
+- UI razlikuje **Priprema** od stvarnog **Snimanje u toku**; više ne tvrdi da snima prije `MediaRecorder.start()`.
+- Ako kamera/enkoder ne krene za 20 sekundi, proces se prekida uz poruku greške.
+- Snimanje kamere ne blokira se ako dozvola za mikrofon nije data; kamera ostaje obavezna, a zvuk je opcionalan.
+- Biraju se Camera2 izlazne rezolucije koje uređaj prijavljuje kompatibilnim s H.264 enkoderom. Snima se najveća kompatibilna, do 4K, bez dodatne rekompresije pri spremanju ili izvozu. Nije moguće garantirati 4K ako kodek ne podržava.
+- Greška video enkodera postaje čitljiva unutar aplikacije, umjesto da ostane samo u Android Logcatu.
+- Nakon završavanja MP4 provjerava se ima li čitljiv video track. Neispravan privremeni fajl ostaje dostupan za dijagnostiku, ne prikazuje se kao uspješno spremljen.
+- Oštećen `records.json` zadržava se pod rezervnim nazivom, a sef pokušava vratiti `.svr` zapise.
+- U sefu je novo dugme **Dijagnostika snimanja i sefa**, koje prikazuje broj stvarnih šifriranih fajlova, broj evidentiranih fajlova, privremenih MP4 i nedovršenih šifriranih zapisa, veličinu posljednjeg snimanja, slobodnu memoriju i posljednju grešku.
+
+### Testiranje v5
+
+1. **Nemoj deinstalirati v4 niti očistiti podatke aplikacije.** Za update moraš imati APK sa istim signing ključem kao instalirana v4, inače možeš izgubiti AES ključ i snimke.
+2. Nakon uspješnog updatea otvori aplikaciju i opciju **Sef → Dijagnostika snimanja i sefa**. Zapiši stanje prije probnog snimanja.
+3. Pokreni kameru (sa dozvolom i vidljivom Android obavijesti) i sačekaj da se status promijeni iz *Priprema* u *Snimanje u toku*. Snimaj 15 sekundi.
+4. Pritisni Stop u aplikaciji; sačekaj završetak *Spremanje u sef*. Ako snimak izostaje, opet otvori dijagnostiku i pogledaj posljednju grešku. Ne briši privremene podatke.
+5. Ako piše `Privremeni MP4: 1` ili više, probaj **Provjeri i obnovi pronađene snimke**. Ne pokušavaj automatsko brisanje ni reinstalaciju.
+
+**Napomena o kvalitetu:** nema dodanog transkodiranja. Izvorni H.264 kodirani zapis šifrira se bajt-po-bajt. Ograničavanje rezolucije na stvarne mogućnosti enkodera može spriječiti neuspjele startove, ali stvarna rezolucija ovisi o uređaju.
+
+
 ## Šta je novo u v4 (popravka praznog sefa)
 
 - Dok se MP4 šifrira, prikazuje se **Spremanje u sef**; više ne javlja uspjeh prije završetka.
@@ -58,7 +82,7 @@ Workflow koristi Capacitor 8.6.0 i JDK 21. `android/` scaffold se generira tokom
 
 1. Testiraj osobito **prednju/zadnju kameru**, i 4K kompatibilnost pojedinih uređaja: Camera2 veličina nije uvijek jednaka MediaRecorder mogućnosti. Ako MediaRecorder javlja grešku, u native kodu dodaj fallback na 1080p. Za svaki novi pokušaj prvo zaustavi staru sesiju.
 2. Android 14+ ograničava pokretanje servisa s kamerom iz pozadine; pokreni snimanje dok je aplikacija vidljiva. MediaProjection traži odobrenje za svaku sesiju i može se sistemski prekinuti (npr. zaključavanjem ekrana).
-3. Kod dužih zapisa šifriranje može trajati nakon zaustavljanja. Testiraj da li OEM dopušta servisu da završi obradu. Trenutna verzija nema UI s greškom za neuspjeli native start/save, samo Android Logcat; smatraj je **razvojnom verzijom**, ne aplikacijom potvrđene pouzdanosti.
+3. Kod dužih zapisa šifriranje može trajati nakon zaustavljanja. Testiraj da li OEM dopušta servisu da završi obradu. U v5 neuspjeh starta i spremanja prikazuje se u UI; smatraj je **razvojnom verzijom**, ne aplikacijom potvrđene pouzdanosti.
 4. Android Keystore ključ se ne može vratiti nakon brisanja aplikacije: backup samih `.svr` datoteka nije dovoljan za oporavak. Nema cloud-backupa.
 5. Prije snimanja osiguraj da osobe i prostor koji snimaš dozvoljavaju snimanje, gdje je to potrebno.
 6. Za ekranske klipove trenutno se bilježi slika ekrana, **bez internog sistemskog zvuka**. Kamerom se snima zvuk mikrofona uz dozvolu.
