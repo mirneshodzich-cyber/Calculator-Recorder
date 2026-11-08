@@ -1,6 +1,134 @@
+# v11 – Diktafon, eksterni šifrirani .cjn sef, obavijesti
+
+**Na osnovu v10.1 build-fix izdanja.** Prijašnje funkcije ostaju: snimanje kamere/ekrana, izbor objektiva, 90-minutni prekid nakon izlaska iz aplikacije, AES-256-GCM kompatibilnost SVR1/SVR2, stvarni napredak i prekid pregleda/izvoza, jedan transfer odjednom te pojedinačno brisanje.
+
+## Nove funkcije
+
+- **Diktafon:** odaberi „♫ Diktafon”, dopuštenje za mikrofon, zatim pokreni/zaustavi. Snima originalni AAC-LC/MPEG-4 audio na 48 kHz / 256 kbps (.m4a) i šifrira ga u isti AES-256-GCM sef. Reprodukcija zvuka unutar aplikacije koristi Android MediaPlayer s pauzom i pozicioniranjem. Izvoz u `Music/Calculator Exports/`, bez ponovne kompresije. Foreground service ima `microphone` tip i vidljivu obavijest.
+- **Zasebni `.cjn` fajlovi:** novi šifrirani zapisi se čuvaju kao `system_XXXXXXXXXXX.cjn` u `Android/data/com.privacystudio.calculator/files/SecureArchive/` na aplikacijskoj eksternoj pohrani. To je **izvan APK-a**, nije u galeriji, ali ostaje pod kontrolom aplikacije (na Android 11+ pristup iz običnih file-managera može biti ograničen). Podaci u `.cjn` su postojeći SVR2 AES-GCM bajtovi, samo drugo ime i fizička lokacija. Naziv/ekstenzija nisu dodatna sigurnosna zaštita.
+- **Migracija starih snimaka:** `RecorderStore.repairIndex()` kopira stare `.svr` fajlove iz privatnog internog sefa u eksterni `system_<stari-id>.cjn`, radi `fsync` i provjeru veličine; tek potom uklanja staru kopiju. Indeks i Keystore alias ostaju isti. Ako nema vanjske pohrane, zapisivanje se prekida uz grešku umjesto nesigurnog kopiranja.
+- **Brisanje stvarnog fajla:** „Obriši” briše odgovarajući `.cjn` i privremeno dešifrirani `.mp4`/`.m4a` cache, a ne samo stavku iz UI-ja. Već izvezene kopije u galeriji nisu dio sefa i ostaju; Android/flash storage ne garantuje forenzički sigurno prepisivanje obrisanih sektora.
+- **Neutralna ikonica obavijesti:** umjesto kamere prikazuje se neutralan indikator kruga (`ic_recording_status.xml`). Ne uklanja sistemsku statusnu ikonu privatnosti niti samu obavijest.
+- **Prilagodljiv naslov:** u Postavkama postavi 1–36 znakova; naslov obavijesti prikazuje `Naziv · 正在录制视频 / 正在录制屏幕 / 正在录音` i ostaje jasna oznaka aktivnog snimanja. Bez zasebnog stop dugmeta, dodirom se otvara Calculator. Promjena se prikazuje odmah, uključujući aktivnu obavijest.
+
+## Vrlo važno: pohrana i nadogradnja
+
+`getExternalFilesDir()` je aplikacijska ekstern(a) pohrana; **Android obično briše tu lokaciju pri deinstalaciji aplikacije**. Android Keystore ključ može se izgubiti pri deinstalaciji i izvezeni šifrirani `.cjn` bez njega neće biti čitljiv. Zato nemoj deinstalirati/brisati app data. Instaliraj APK **preko postojeće instalacije istim potpisnim ključem**. Ako korisnik treba trajni backup nakon deinstalacije, potreban je dodatni izvoz + portabilan sistem ključev(a) (nije dio v11). 
+
+**Kompatibilnost:** v11 otvara SVR1, SVR2 i .cjn; stariji APK-ovi neće znati čitati eksterni `.cjn`. Nemoj vraćati stari APK nakon migracije. Pusti da prvi ulazak u sef dovrši migraciju prije snimanja/brisanja.
+
+## Fajlovi za zamjenu na GitHubu
+
+```
+native/java/com/privacystudio/calculator/RecorderService.java
+native/java/com/privacystudio/calculator/RecorderStore.java
+native/java/com/privacystudio/calculator/SecureRecorderPlugin.java
+native/java/com/privacystudio/calculator/PreviewActivity.java
+native/res/drawable/ic_recording_status.xml     (NOVI)
+www/app.js
+www/index.html
+README.md
+```
+
+`install-native.mjs` već kopira cijeli folder `native/res/drawable`, pa za novu ikonicu nije potrebna izmjena skripte.
+
+**QA:** `node --check` i Playwright UI testovi s lažnim Android pozivima su prošli. Kompletan Android build, Keystore, stvarna kamera/mikrofon, MP4/M4A reprodukcija, migracija na fizičkom uređaju još **nisu testirani**.
+
+---
+
+# v10 – Popravka 0% izvoza, prekida i pojedinačno brisanje
+
+**Promjene u odnosu na v9 (bez smanjenja kvaliteta i bez ponovnog kodiranja videa):**
+
+- `RecorderStore.java` – novi snimci koriste blokovski AES-256-GCM format **SVR2** (256 KiB/blok, svaki blok ima zaseban IV i autentifikacijsku oznaku); otvaranje i izvoz imaju stvaran napredak i provjeru prekida između blokova. Ranije spremljeni **SVR1** snimci se i dalje dešifriraju, bez izmjene originala. SVR2 zapis nosi ukupnu veličinu i kriptografski veže redoslijed/veličinu blokova, pa se nepotpuni fajlovi otkrivaju. Dodano `deleteOne(id)` za pojedinačno trajno brisanje.
+- `SecureRecorderPlugin.java` – izdvojen radnik za obradu videa, brže čitanje statusa, `cancelTransfer` sada postavlja oznaku prekida **i prekida aktivni radni thread**; dodan `deleteOne` poziv. Izvoz i pregled međusobno se isključuju.
+- `RecorderService.java` – `MediaRecorder.stop()` i MP4 finalizacija rade na IO threadu umjesto blokiranja Android glavne niti. Aktivna sistemska obavijest traje dok se datoteka sprema u sef; čuvaju se neuspjeli privremeni MP4-ovi.
+- `www/app.js`, `www/index.html` – napredak, prekid, otkrivanje izgubljenog callbacka, pojedinačno brisanje iz liste i detalja, potvrda prije brisanja.
+
+**Za zamjenu na GitHubu:**
+
+```
+native/java/com/privacystudio/calculator/RecorderService.java
+native/java/com/privacystudio/calculator/RecorderStore.java
+native/java/com/privacystudio/calculator/SecureRecorderPlugin.java
+www/app.js
+www/index.html
+README.md
+```
+
+**Važno o kompatibilnosti:** AES ključ u Android Keystoreu i naziv aplikacijskog paketa su nepromijenjeni. Nova v10 aplikacija čita stare SVR1 i nove SVR2 fajlove, ali stari APK ne može čitati nove SVR2 fajlove. Nemoj se vraćati na v9 bez prethodnog izvoza novih snimaka. Ne briši podatke/deinstaliraj aplikaciju; nadograđuj istim potpisnim ključem.
+
+**Brisanje:** iz liste odaberi `✕` ili otvori snimak i odaberi „Obriši snimak iz sefa”. Aplikacija traži potvrdu. Ova radnja trajno briše šifriranu privatnu kopiju, ali namjerno ne briše eventualnu ranije izvezenu MP4 kopiju u galeriji.
+
+**Napredak i prekid:** Za nove SVR2 snimke obrada teče u ograničenim blokovima. Za starije SVR1 fajlove napredak pokazuje pročitane šifrirane bajtove; stariji monolitni GCM format i dalje može imati dužu završnu provjeru. Prekinuti izvoz uklanja nepotpuni MediaStore zapis; pregled uklanja nepotpuni privatni cache MP4. Originalni šifrirani snimak ostaje netaknut.
+
+**Provjere:** prošao `node --check www/app.js`, Playwright simulacija prikaza/procenta/jednog izvoza/oba prekida/brisanja, te Java JCE test blokovskog AES-GCM formata (razne veličine, detekcija preinake i nepotpunog fajla). **Kompletan Android build i ponašanje na fizičkom telefonu nisu ovdje testirani.**
+
+---
+
+# v9 – Napredak, prekid obrade i jedan izvoz u isto vrijeme
+
+**Na osnovu funkcionalne v8 verzije (90 minuta izvan aplikacije).** Ova verzija mijenja isključivo obradu izvoza/pregleda i pripadajući UI; `RecorderService.java`, 90-minutni tajmer, enkripcijski ključ/alias i `.svr` format ostaju isti.
+
+## Šta je novo
+
+- **Stvarni napredak od 0 do 99%** kod izvoza i pripreme privatnog pregleda: stanje se čita od Android plugina (`transferStatus`) i temelji se na obrađenim bajtovima, ne na izmišljenom odbrojavanju. Završni dio (provjera AES-GCM autentifikacije, objava u galeriji ili otvaranje playera) može trajati i nakon 99%.
+- **Prekini izvoz / Prekini otvaranje**: signal za prekid preko `cancelTransfer`; pri prekidu izvoza nepotpuni `MediaStore` unos se briše, a pri prekidu pripreme pregleda briše se nepotpuna privremeno dešifrirana MP4 kopija.
+- **Samo jedan transfer u isto vrijeme**: zaštita u UI-ju i zasebno u Android pluginu preko `AtomicReference`. Dok jedan snimak traje, drugi izvoz/pregled nije dozvoljen.
+- **Odvojena obrada stanja/liste sefa**: lagane operacije čitanja liste i dijagnostike rade u posebnom executor-u, kako ne bi ostale iza dugotrajnog izvoza.
+- **Bez pada kvaliteta**: i pregled i izvoz dešifriraju originalni MP4 bajt-po-bajt, bez transkodiranja. Originalni šifrirani zapis ne mijenja se prekidanjem.
+
+**Izmijenjeni fajlovi:** `www/index.html`, `www/app.js`, `native/java/com/privacystudio/calculator/SecureRecorderPlugin.java`, `native/java/com/privacystudio/calculator/RecorderStore.java`, `README.md`.
+
+## Test na uređaju
+
+1. Instaliraj kao **update** preko v8, potpisan **istim ključem**; nemoj deinstalirati ili brisati app data.
+2. Otvori sef, izvezi veći video, provjeri da postotak i broj MB rastu. Pokreni drugi izvoz: njegov gumb mora biti onemogućen.
+3. Prekini prvi izvoz na 20–50%. Provjeri da nepotpuna datoteka nije u galeriji i da original ostaje u sefu.
+4. Otvori video za privatni pregled, pritisni Prekini tokom pripreme, zatim pokreni ponovno. Nakon uspjeha player se treba otvoriti normalno.
+5. Provjeri da je 90-minutni automatski prekid snimanja ostao nepromijenjen.
+
+**QA:** `node --check` prolazi. ZIP struktura je provjerena. Nije izvršen potpuni Android build niti testiran Android Keystore/MediaStore na fizičkom uređaju. Posebno je važno testirati vrlo velike video snimke: Android Keystore/GCM i pojedini uređaji mogu imati performansna ograničenja.
+
+---
+
+# v8 – 90 minuta izvan aplikacije
+
+- Promijenjeni fajlovi: `native/java/com/privacystudio/calculator/RecorderService.java`, `www/app.js`, `www/index.html` i `README.md`.
+- Android servis zaustavlja aktivno snimanje nakon 90 minuta neprekidno izvan aplikacije, uz zadržavanje postojeće vidljive obavijesti.
+- Povratak u glavni ekran ili ugrađeni player resetuje tajmer. Za vrijeme otvorene aplikacije nije aktivan 90-minutni timeout.
+- Ostale funkcije snimanja, enkripcije, pregleda i izvoza nisu mijenjane.
+- **Nije testirano na fizičkom uređaju niti potpuno kompilirano u Android APK u ovom okruženju.**
+
+---
+
+# v7 – Pregled i izvoz iz sefa
+
+- **Izmijenjeni fajlovi:** `www/app.js`, `www/index.html`, `native/java/com/privacystudio/calculator/SecureRecorderPlugin.java`, `native/java/com/privacystudio/calculator/RecorderStore.java`, `native/java/com/privacystudio/calculator/MainActivity.java`, `scripts/install-native.mjs`, `README.md`.
+- **Novi fajl:** `native/java/com/privacystudio/calculator/PreviewActivity.java`.
+- Novi izvorni Android video-player unutar aplikacije za pregled MP4; ne ovisi o Capacitor WebView-u i `file://` putanji. Privremeno dešifriran MP4 briše se pri zatvaranju playera.
+- Svaki zapis u sefu ima zasebno **Izvoz** dugme; nije potrebno prvo reprodukovati. Modal ima posebno **Pusti video u aplikaciji**.
+- Izvoz stvara nešifriranu kopiju u `Movies/Calculator Exports/`, postavlja Android MediaStore `IS_PENDING=0` ; nema reenkodiranja ni transkodiranja.
+- Ako se vidi **Privremeni MP4** u dijagnostici, ali **Šifrirani fajlovi: 0**, prvo pritisni **Provjeri i obnovi pronađene snimke**. Video ne može biti pregledan/izvezen iz sefa dok ga Android uspješno ne šifrira i indeksira.
+- **Ne deinstaliraj aplikaciju i ne briši podatke:** šifrirani snimci i ključ mogu postati nepovratni. APK mora biti potpisan istim ključem kao prethodno instalirana verzija.
+- Validacije: `node --check`, arhiva i statički pregled. **Potpuni Android build i reprodukcija na uređaju nisu potvrđeni** u ovom okruženju.
+
+---
+
 # Calculator / Privacy Recorder — Capacitor 8 Android
 
 Ovo je **Android izvorni projekt**, s interaktivnim `www/index.html` pregledom i vlastitim native Java pluginom. Nije gotov APK: potrebno ga je sastaviti pomoću Android SDK-a ili GitHub Actions. Nije testiran na stvarnom Android uređaju u ovom okruženju.
+
+## v6: Ispravka AES-GCM IV greške (na osnovu dijagnostike v5)
+
+Dijagnostika je potvrdila: **`Caller-provided IV not permitted`**. U v5 `RecorderStore.encryptRecording()` je unaprijed generisao IV i dodavao ga u `Cipher.init(ENCRYPT_MODE, key, GCMParameterSpec(...))`. **Android Keystore odbija IV koji je aplikacija sama poslala.**
+
+- Sada `Cipher.init(Cipher.ENCRYPT_MODE, key())` dopušta Android Keystoreu da generiše sigurni 12-bajtni IV, a `cipher.getIV()` sprema stvarni IV u postojeći SVR1 format (`MAGIC` + 12-bajtni IV + ciphertext/tag).
+- Dešifriranje i izvoz ostaju kompatibilni s formatom SVR1; **nije kreiran novi ključ i ne mijenja se AndroidKeyStore alias**.
+- `RecorderService` i UI nisu mijenjani. Nakon ažuriranja u sefu klikni **„Provjeri i obnovi pronađene snimke”** da obradi sačuvani 47,5 MB MP4 i eventualne druge privremene snimke.
+- Oporavak radi samo ako je MP4 ispravno dovršen i ako je update instaliran preko postojeće aplikacije **istim Android potpisom**. Ne deinstaliraj i ne briši podatke aplikacije.
+
+**Izmijenjen je samo jedan izvorni fajl:** `native/java/com/privacystudio/calculator/RecorderStore.java`. Ovaj ZIP sadrži ostatak v5 bez drugih funkcionalnih izmjena.
 
 ## v5: Dijagnostika problema sa spremanjem
 
@@ -48,7 +176,7 @@ Za dijagnostiku: snimaj 10–15 sekundi, zaustavi, sačekaj da prođe **Spremanj
 - Kalkulator kao početni ekran i kao ikonica aplikacije; `73 + 27 =` otvara privatnu navigaciju. Izraz se može promijeniti u postavkama. **Ovo nije snažan oblik autentifikacije**; za ozbiljnu zaštitu podataka potreban je zaseban PIN/biometrija.
 - Prednja/zadnja kamera preko Android Camera2 API-ja; snimanje ekrana preko MediaProjection (nova sistemska dozvola **svaki put**).
 - Foreground service: snimanje može nastaviti nakon `Home`, zaključavanja UI-ja ili uklanjanja taska iz recent apps dok Android i uređaj dopuštaju servis. **Ne radi nakon `Force stop`, ubijanja procesa ili blokade servisa od proizvođača**.
-- Snimanje se prekida nakon **20 minuta bez interakcije s aplikacijom**, uključujući kada nije otvorena. Pauza timera po dodiru/otvaranju. Odbrojavanje počinje od posljednje interakcije.
+- Snimanje se prekida nakon **90 minuta neprekidno izvan aplikacije**. Odbrojavanje počinje kada se aplikacija napusti, čak i kada je zadatak uklonjen iz nedavnih aplikacija. Povratak u aplikaciju poništava tajmer; novi izlazak pokreće novih 90 minuta. Dok je aplikacija otvorena, ovo ograničenje se ne odbrojava. Zaustavljanje može kasniti do 5 sekundi zbog provjere tajmera.
 - Ongoing obavijest na pojednostavljenom kineskom: `正在录制视频`, bez vlastitog Stop dugmeta; tap obavijesti otvara app. Androidovi sistemski indikatori/čipovi ostaju.
 - MP4 je unutar interne app memorije privremeno tijekom snimanja, zatim se po zaustavljanju šifrira AES-256-GCM ključem iz Android Keystorea; nakon uspjeha original se briše, a video se ne dodaje u galeriju. **Privremeni nešifrirani MP4 postoji dok snimanje i obrada traju**; ovo nije potpuna enkripcija u realnom vremenu.
 - Pregled u sefu: datoteka se privremeno dešifrira u app-private cache; nakon zatvaranja pregleda/pozadine se briše. Izvoz ide direktno u `MediaStore`/`Movies/Private Video Exports`, bez ponovnog kodiranja. Izvezena kopija je vidljiva u galeriji i više nije šifrirana.
