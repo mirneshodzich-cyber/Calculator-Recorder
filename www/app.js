@@ -1,6 +1,6 @@
 (()=>{'use strict';
 const $=id=>document.getElementById(id);
-const state={secret:'73+27',tab:'home',mode:'camera',lens:'back',files:[],active:false,preparing:false,saving:false,lastSavedAt:0,lastError:'',unprocessedFiles:0,synced:false,startedAt:0,currentId:null,preview:null,openingPlayer:false};
+const state={secret:'73+27',tab:'home',mode:'camera',lens:'back',files:[],active:false,preparing:false,saving:false,lastSavedAt:0,lastError:'',unprocessedFiles:0,synced:false,startedAt:0,currentId:null,preview:null,openingPlayer:false,transfer:null};
 try{const v=localStorage.getItem('calculator_secret_v2');if(v&&/^[0-9.+*/-]{3,40}$/.test(v))state.secret=v}catch{}
 const isAndroid=()=>!!(window.Capacitor&&window.Capacitor.isNativePlatform&&window.Capacitor.isNativePlatform());
 const native=(method,args={})=>{
@@ -29,7 +29,7 @@ function calcPress(k){
  if('+-*/'.includes(k)){if(!expression){if(k==='-')expression='-';calcRender();return};solved=false;if(/[+*/-]$/.test(expression))expression=expression.slice(0,-1);expression+=k;calcRender()}
 }
 function unlock(){unlocked=true;$('calcPage').classList.remove('active');$('vaultPage').classList.add('active');tab('home');refresh()}
-function lock(){unlocked=false;closeFile();$('calcPage').classList.add('active');$('vaultPage').classList.remove('active');expression='';solved=false;calcRender()}
+function lock(){if(state.transfer){toast('Prvo završi ili prekini obradu snimka.');return}unlocked=false;closeFile();$('calcPage').classList.add('active');$('vaultPage').classList.remove('active');expression='';solved=false;calcRender()}
 $('keypad').addEventListener('click',e=>{let b=e.target.closest('[data-key]');if(b)calcPress(b.dataset.key)});
 document.addEventListener('keydown',e=>{if(unlocked||['INPUT','TEXTAREA'].includes(document.activeElement?.tagName))return;let k=e.key;if(/^[0-9.]$/.test(k)||['+','-','*','/','%'].includes(k)){calcPress(k);e.preventDefault()}else if(k==='Enter'||k==='='){calcPress('=');e.preventDefault()}else if(k==='Escape'){calcPress('C');e.preventDefault()}else if(k==='Backspace'){calcPress('DEL');e.preventDefault()}});
 $('calcMenu').onclick=()=>toast('Calculator • privatni prikaz');
@@ -56,7 +56,7 @@ $('recordButton').onclick=async()=>{
  try{const stopping=state.active;if(stopping)await native('stop');else await native(state.mode==='camera'?'startCamera':'startScreen',state.mode==='camera'?{lens:state.lens}:{});await refresh();toast(stopping?'Snimanje se zaustavlja; snimak se pohranjuje u sef.':'Pokretanje zatraženo. Android će prikazati status snimanja.')}catch(e){toast('Greška: '+(e.message||e))}finally{$('recordButton').disabled=state.saving||state.preparing}
 };
 function videoIcon(){return '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="13" height="14" rx="2"/><path d="m16 10 5-3v10l-5-3"/></svg>'}
-function fileMarkup(f){return `<div class="file-row tap-row" data-file-id="${esc(f.id)}" tabindex="0" role="button"><div class="file-icon">${videoIcon()}</div><div class="file-main"><div class="file-title">${esc(f.name)}</div><div class="file-meta">${f.type==='screen'?'Ekran':(f.lens==='front'?'Prednja kamera':'Zadnja kamera')} · ${tformat(f.durationSec)} · ${new Date(f.createdAt).toLocaleDateString('bs-BA')}</div><div class="size-label">${Number(f.sizeBytes/1048576).toFixed(1)} MB · šifrirano</div></div><button class="row-button" type="button" data-export-id="${esc(f.id)}">Izvoz</button><span class="file-action">›</span></div>`}
+function fileMarkup(f){return `<div class="file-row tap-row" data-file-id="${esc(f.id)}" tabindex="0" role="button"><div class="file-icon">${videoIcon()}</div><div class="file-main"><div class="file-title">${esc(f.name)}</div><div class="file-meta">${f.type==='screen'?'Ekran':(f.lens==='front'?'Prednja kamera':'Zadnja kamera')} · ${tformat(f.durationSec)} · ${new Date(f.createdAt).toLocaleDateString('bs-BA')}</div><div class="size-label">${Number(f.sizeBytes/1048576).toFixed(1)} MB · šifrirano</div></div><button class="row-button" type="button" data-export-id="${esc(f.id)}" ${state.transfer?'disabled aria-disabled="true"':''}>Izvoz</button><span class="file-action">›</span></div>`}
 function renderFiles(){let a=state.files;let filtered=a.filter(f=>f.name.toLowerCase().includes(($('fileSearch').value||'').toLowerCase()));$('fileCountHome').textContent=a.length+' zapisa';$('vaultFileCount').textContent=a.length+' datoteka';$('recentHome').innerHTML=a.length?a.slice(0,3).map(fileMarkup).join(''):'<div class="empty">Još nema snimaka. Pokreni snimanje u Android aplikaciji.</div>';$('vaultList').innerHTML=filtered.length?filtered.map(fileMarkup).join(''):'<div class="empty">Nema zapisa za prikaz.</div>'}
 $('fileSearch').addEventListener('input',renderFiles);
 $('diagnoseVault').onclick=async()=>{
@@ -90,20 +90,94 @@ async function openFile(id){
  $('modalStatus').hidden=true;$('modalStatus').textContent='';
  $('overlay').classList.add('open');$('overlay').setAttribute('aria-hidden','false');
 }
-async function exportFile(id){
- if(!isAndroid()){toast('Izvoz radi samo u Android aplikaciji.');return}
- const f=state.files.find(x=>x.id===id);if(!f)return toast('Snimak nije pronađen u sefu. Provjeri obnovu snimaka.');
- if(!confirm('Izvesti '+f.name+' u galeriju? Kopija više neće biti šifrirana.'))return;
- const btn=$('exportModal');btn.disabled=true;
- try{
-   const r=await native('export',{id});
-   const text='MP4 izvezen bez promjene kvaliteta: '+r.name+'. Potraži Movies/Calculator Exports.';
-   toast(text);if(state.currentId===id)closeFile();
- }catch(e){
-   const msg='Izvoz nije uspio: '+(e.message||e);toast(msg);
-   if($('overlay').classList.contains('open')){$('modalStatus').hidden=false;$('modalStatus').textContent=msg;}
- }finally{btn.disabled=false}
+// One transfer at a time. Native AtomicReference also guards against double taps
+// and calls from separate WebView events. Progress is based on actual cipher bytes.
+const prettyBytes=b=>(Math.max(0,Number(b)||0)/1048576).toFixed(1)+' MB';
+function drawTransfer(status={}){
+ const t=state.transfer;if(!t)return;
+ const p=Math.max(0,Math.min(99,Number(status.percent)||0));
+ $('transferPercent').textContent=p+'%';
+ $('transferFill').style.width=p+'%';
+ $('transferBar').setAttribute('aria-valuenow',String(p));
+ const phase=t.canceling?'Zaustavljanje i čišćenje nepotpunog fajla...':(status.phase||'Priprema obrade...');
+ $('transferStage').textContent=phase;
+ $('transferDetails').textContent=status.total>0
+    ?`${prettyBytes(status.bytes)} / ${prettyBytes(status.total)} obrađeno. ${t.kind==='export'?'Original u sefu ostaje netaknut.':'Pripremam kopiju isključivo za privatni pregled.'}`
+    :'Pripremam obradu u privatnoj memoriji...';
 }
+async function pollTransfer(t){
+ if(state.transfer!==t||t.polling||!isAndroid())return;
+ t.polling=true;
+ try{
+   const status=await native('transferStatus');
+   if(state.transfer!==t)return;
+   if(status.active){
+     drawTransfer(status);
+     if(t.canceling&&!t.cancelSent){
+       t.cancelSent=true;
+       await native('cancelTransfer');
+     }
+   }
+ }catch(e){/* Polling failure must not interrupt an otherwise successful native transfer. */}
+ finally{t.polling=false}
+}
+async function runTransfer(kind,id){
+ if(!isAndroid()){toast('Otvaranje i izvoz dostupni su u Android aplikaciji.');return}
+ if(state.transfer){toast('Već obrađujem jedan snimak. Prekini ili sačekaj završetak.');return}
+ const f=state.files.find(x=>x.id===id);
+ if(!f){toast('Snimak nije pronađen u sefu.');return}
+ const t={kind,id,canceling:false,cancelSent:false,polling:false,timer:null};
+ state.transfer=t;
+ const isExport=kind==='export';
+ $('transferHeading').textContent=(isExport?'Izvoz: ':'Otvaranje: ')+f.name;
+ $('transferOverlay').hidden=false;$('transferOverlay').setAttribute('aria-hidden','false');
+ $('cancelTransfer').disabled=false;$('cancelTransfer').textContent='Prekini '+(isExport?'izvoz':'otvaranje');
+ drawTransfer();renderFiles();
+ if(!isExport)state.openingPlayer=true;
+ t.timer=setInterval(()=>pollTransfer(t),300);
+ try{
+   const result=await native(isExport?'export':'play',{id});
+   if(isExport){
+     toast('Izvezeno bez promjene kvaliteta: '+result.name+' · Movies/Calculator Exports');
+     if(state.currentId===id)closeFile();
+   }else{
+     $('modalStatus').hidden=false;$('modalStatus').textContent='Video-player je otvoren.';
+   }
+ }catch(e){
+   const canceled=t.canceling||/prekinut/i.test(String(e?.message||e));
+   const message=canceled?(isExport?'Izvoz prekinut. Nepotpuna kopija je uklonjena.':'Otvaranje prekinuto. Privatna privremena kopija je uklonjena.'):(isExport?'Izvoz nije uspio: ':'Otvaranje nije uspjelo: ')+(e?.message||e);
+   toast(message);
+   if($('overlay').classList.contains('open')){
+     $('modalStatus').hidden=false;$('modalStatus').textContent=message;
+   }
+   if(!isExport)state.openingPlayer=false;
+ }finally{
+   clearInterval(t.timer);
+   if(state.transfer===t){
+     state.transfer=null;
+     $('transferOverlay').hidden=true;$('transferOverlay').setAttribute('aria-hidden','true');
+     renderFiles();
+   }
+ }
+}
+function exportFile(id){
+ if(state.transfer)return toast('Izvoz ili otvaranje drugog snimka je već u toku.');
+ const f=state.files.find(x=>x.id===id);if(!f)return toast('Snimak nije pronađen u sefu.');
+ if(!isAndroid())return toast('Izvoz radi samo u Android aplikaciji.');
+ if(!confirm('Izvesti '+f.name+' u galeriju? Kopija više neće biti šifrirana.'))return;
+ runTransfer('export',id);
+}
+$('cancelTransfer').onclick=async()=>{
+ const t=state.transfer;
+ if(!t||t.canceling)return;
+ t.canceling=true;
+ $('cancelTransfer').disabled=true;$('cancelTransfer').textContent='Prekidam...';
+ drawTransfer();
+ try{
+   const result=await native('cancelTransfer');
+   if(result.cancelRequested)t.cancelSent=true;
+ }catch(e){/* Poll will retry if a native operation is active. */}
+};
 for(const host of ['recentHome','vaultList']){
  $(host).addEventListener('click',e=>{
    const ex=e.target.closest('[data-export-id]');
@@ -123,19 +197,7 @@ function closeFile(){
 }
 $('closeModal').onclick=closeFile;
 $('overlay').onclick=e=>{if(e.target===$('overlay'))closeFile()};
-$('playModal').onclick=async()=>{
- const id=state.currentId;if(!id)return;
- if(!isAndroid())return toast('Pregled je dostupan u instaliranoj Android aplikaciji.');
- const btn=$('playModal');btn.disabled=true;btn.textContent='Otvaranje video-playera...';
- $('modalStatus').hidden=false;$('modalStatus').textContent='Dešifriranje u privatnu memoriju; original ostaje u sefu.';
- try{
-   state.openingPlayer=true;await native('play',{id});
-   $('modalStatus').textContent='Video-player je otvoren.';
- }catch(e){
-   state.openingPlayer=false;const msg='Pregled nije uspio: '+(e.message||e);
-   $('modalStatus').textContent=msg;toast(msg);
- }finally{btn.disabled=false;btn.textContent='▶ Pusti video u aplikaciji'}
-};
+$('playModal').onclick=()=>{if(state.currentId)runTransfer('play',state.currentId)};
 $('exportModal').onclick=()=>{if(state.currentId)exportFile(state.currentId)};
 $('saveSecret').onclick=()=>{let x=$('secretInput').value.replace(/\s/g,'').replaceAll('×','*').replaceAll('÷','/');if(!/^[\d.+*/-]{3,40}$/.test(x)||evalCalc(x)===null){toast('Unesi važeću kombinaciju, npr. 73+27');return}state.secret=x;try{localStorage.setItem('calculator_secret_v2',x)}catch{}toast('Kombinacija sačuvana.')};
 $('resetDemo').textContent='Obriši sve snimke (uz potvrdu)';

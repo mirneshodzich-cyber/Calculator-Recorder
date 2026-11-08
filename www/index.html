@@ -31,6 +31,20 @@ body,button,input,select{font-family:Manrope,Inter,system-ui,-apple-system,sans-
 .meta-warning{font-size:11px;color:#a9b9ce;line-height:1.55}.size-label{font-size:10px;color:#93b8c0;margin-top:8px}.demo-bar{margin-bottom:13px}
 @media(max-width:480px){.desktop{padding:0}.device{width:100%;height:100dvh;min-height:0;border-radius:0;border:0;box-shadow:none}.device:before{display:none}.calc-keypad{height:51%;padding-bottom:max(25px,env(safe-area-inset-bottom))}}
 </style>
+<style>
+/* v9: Native byte-based progress and deliberate cancellation, not a fake timer. */
+.transfer-overlay{position:absolute;inset:0;z-index:45;background:rgba(4,9,17,.88);backdrop-filter:blur(9px);display:grid;place-items:center;padding:20px}
+.transfer-card{width:100%;max-width:390px;background:linear-gradient(145deg,#203345,#151e30);border:1px solid #4a6573;border-radius:24px;padding:23px;box-shadow:0 22px 70px #0009}
+.transfer-label{font-size:10px;font-weight:800;letter-spacing:2px;color:#a4e9d1}
+.transfer-name{margin:9px 0 22px;font-size:18px;font-weight:800;line-height:1.35;word-break:break-word}
+.transfer-progress-top{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;color:#d0deee;margin-bottom:9px}
+.transfer-percent{font-size:20px;font-weight:800;color:#a8edd4;font-variant-numeric:tabular-nums}
+.transfer-track{height:12px;background:#0c1521;border:1px solid #405365;border-radius:99px;overflow:hidden}
+.transfer-fill{height:100%;width:0%;background:linear-gradient(90deg,#71b7ae,#b6ffe1);transition:width .24s ease;border-radius:99px}
+.transfer-status{color:#b4c6d7;font-size:12px;line-height:1.55;min-height:36px;margin:13px 0 6px}
+.transfer-cancel{margin-top:14px;width:100%;min-height:47px;border-radius:13px;border:1px solid #af7280;background:#442a37;color:#ffd5dc;font-size:13px;font-weight:800}
+.transfer-cancel:disabled{opacity:.6}
+</style>
 </head>
 <body>
 <div class="desktop"><div class="device" id="device">
@@ -83,6 +97,16 @@ body,button,input,select{font-family:Manrope,Inter,system-ui,-apple-system,sans-
     <nav class="bottom-nav" aria-label="Navigacija"><button class="nav-btn active" data-tab="home"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Početna</button><button class="nav-btn" data-tab="vault"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 10h16M10 5v14"/></svg>Sef</button><button class="nav-btn" data-tab="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.9l-1.7 1.7a1.7 1.7 0 0 0-1.9-.34 1.7 1.7 0 0 0-1.08 1.56H8.94a1.7 1.7 0 0 0-1.08-1.56 1.7 1.7 0 0 0-1.9.34l-1.7-1.7A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.08v-2.4A1.7 1.7 0 0 0 4.6 10.4a1.7 1.7 0 0 0-.34-1.9l1.7-1.7a1.7 1.7 0 0 0 1.9.34 1.7 1.7 0 0 0 1.08-1.56h6.12a1.7 1.7 0 0 0 1.08 1.56 1.7 1.7 0 0 0 1.9-.34l1.7 1.7a1.7 1.7 0 0 0-.34 1.9 1.7 1.7 0 0 0 1.56 1.08v2.4A1.7 1.7 0 0 0 19.4 15Z" transform="translate(0 -.7)"/></svg>Postavke</button></nav>
   </main>
   <div class="overlay" id="overlay" aria-hidden="true"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="sheet-handle"></div><div class="sheet-title" id="modalTitle">Videozapis</div><div class="sheet-copy" id="modalInfo"></div><div id="modalStatus" class="sheet-copy" hidden role="status"></div><div class="sheet-detail"><span>Vrsta zapisa</span><strong id="modalType"></strong></div><div class="sheet-detail"><span>Trajanje</span><strong id="modalDuration"></strong></div><div class="sheet-detail"><span>Pohrana</span><strong>AES-256-GCM • Android</strong></div><div class="sheet-actions"><button class="sheet-button primary" id="playModal" style="grid-column:1/-1">▶ Pusti video u aplikaciji</button><button class="sheet-button" id="closeModal">Zatvori</button><button class="sheet-button" id="exportModal">↓ Izvoz u galeriju</button></div><div class="hint" style="text-align:center">Izvoz pravi zasebnu MP4 kopiju u folderu Movies/Calculator Exports, bez dodatne kompresije.</div></div></div>
+  <div id="transferOverlay" class="transfer-overlay" hidden aria-hidden="true">
+    <section class="transfer-card" role="dialog" aria-modal="true" aria-labelledby="transferHeading">
+      <div class="transfer-label">PRIVATE SPACE · OBRADA VIDEA</div>
+      <h2 id="transferHeading" class="transfer-name">Pripremam snimak...</h2>
+      <div class="transfer-progress-top"><span id="transferStage">Priprema</span><strong id="transferPercent" class="transfer-percent">0%</strong></div>
+      <div class="transfer-track" role="progressbar" id="transferBar" aria-label="Napredak obrade" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="transfer-fill" id="transferFill"></div></div>
+      <p id="transferDetails" class="transfer-status" role="status" aria-live="polite">Pripremam obradu u privatnoj memoriji...</p>
+      <button id="cancelTransfer" type="button" class="transfer-cancel">Prekini operaciju</button>
+    </section>
+  </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 </div></div>
 <script src="app.js" defer></script>
