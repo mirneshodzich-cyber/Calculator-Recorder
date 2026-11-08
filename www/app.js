@@ -1,6 +1,6 @@
 (()=>{'use strict';
 const $=id=>document.getElementById(id);
-const state={secret:'73+27',tab:'home',mode:'camera',lens:'back',files:[],active:false,preparing:false,saving:false,lastSavedAt:0,lastError:'',unprocessedFiles:0,synced:false,startedAt:0,currentId:null,preview:null};
+const state={secret:'73+27',tab:'home',mode:'camera',lens:'back',files:[],active:false,preparing:false,saving:false,lastSavedAt:0,lastError:'',unprocessedFiles:0,synced:false,startedAt:0,currentId:null,preview:null,openingPlayer:false};
 try{const v=localStorage.getItem('calculator_secret_v2');if(v&&/^[0-9.+*/-]{3,40}$/.test(v))state.secret=v}catch{}
 const isAndroid=()=>!!(window.Capacitor&&window.Capacitor.isNativePlatform&&window.Capacitor.isNativePlatform());
 const native=(method,args={})=>{
@@ -56,7 +56,7 @@ $('recordButton').onclick=async()=>{
  try{const stopping=state.active;if(stopping)await native('stop');else await native(state.mode==='camera'?'startCamera':'startScreen',state.mode==='camera'?{lens:state.lens}:{});await refresh();toast(stopping?'Snimanje se zaustavlja; snimak se pohranjuje u sef.':'Pokretanje zatraženo. Android će prikazati status snimanja.')}catch(e){toast('Greška: '+(e.message||e))}finally{$('recordButton').disabled=state.saving||state.preparing}
 };
 function videoIcon(){return '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="13" height="14" rx="2"/><path d="m16 10 5-3v10l-5-3"/></svg>'}
-function fileMarkup(f){return `<div class="file-row tap-row" data-file-id="${esc(f.id)}" tabindex="0" role="button"><div class="file-icon">${videoIcon()}</div><div class="file-main"><div class="file-title">${esc(f.name)}</div><div class="file-meta">${f.type==='screen'?'Ekran':(f.lens==='front'?'Prednja kamera':'Zadnja kamera')} · ${tformat(f.durationSec)} · ${new Date(f.createdAt).toLocaleDateString('bs-BA')}</div><div class="size-label">${Number(f.sizeBytes/1048576).toFixed(1)} MB · šifrirano</div></div><span class="lock-mini">◆</span><span class="file-action">›</span></div>`}
+function fileMarkup(f){return `<div class="file-row tap-row" data-file-id="${esc(f.id)}" tabindex="0" role="button"><div class="file-icon">${videoIcon()}</div><div class="file-main"><div class="file-title">${esc(f.name)}</div><div class="file-meta">${f.type==='screen'?'Ekran':(f.lens==='front'?'Prednja kamera':'Zadnja kamera')} · ${tformat(f.durationSec)} · ${new Date(f.createdAt).toLocaleDateString('bs-BA')}</div><div class="size-label">${Number(f.sizeBytes/1048576).toFixed(1)} MB · šifrirano</div></div><button class="row-button" type="button" data-export-id="${esc(f.id)}">Izvoz</button><span class="file-action">›</span></div>`}
 function renderFiles(){let a=state.files;let filtered=a.filter(f=>f.name.toLowerCase().includes(($('fileSearch').value||'').toLowerCase()));$('fileCountHome').textContent=a.length+' zapisa';$('vaultFileCount').textContent=a.length+' datoteka';$('recentHome').innerHTML=a.length?a.slice(0,3).map(fileMarkup).join(''):'<div class="empty">Još nema snimaka. Pokreni snimanje u Android aplikaciji.</div>';$('vaultList').innerHTML=filtered.length?filtered.map(fileMarkup).join(''):'<div class="empty">Nema zapisa za prikaz.</div>'}
 $('fileSearch').addEventListener('input',renderFiles);
 $('diagnoseVault').onclick=async()=>{
@@ -80,18 +80,70 @@ $('recoverRecords').onclick=async()=>{
  catch(e){toast('Oporavak nije uspio: '+(e.message||e))}
  finally{btn.disabled=false;btn.textContent='Provjeri i obnovi pronađene snimke'}
 };
-async function openFile(id){let f=state.files.find(x=>x.id===id);if(!f)return;state.currentId=id;$('modalTitle').textContent=f.name;$('modalInfo').textContent='Privatni pregled: video se privremeno dešifrira u privatnu memoriju aplikacije. Nije vidljiv u galeriji.';$('modalType').textContent=f.type==='screen'?'Ekran':(f.lens==='front'?'Prednja kamera':'Zadnja kamera');$('modalDuration').textContent=tformat(f.durationSec);$('overlay').classList.add('open');$('overlay').setAttribute('aria-hidden','false');$('videoPlayer').style.display='none';$('videoPlayer').removeAttribute('src');try{const out=await native('preview',{id});if(state.currentId!==id)return;let url=out.path;if(window.Capacitor?.convertFileSrc)url=window.Capacitor.convertFileSrc(out.path);state.preview=url;$('videoPlayer').src=url;$('videoPlayer').style.display='block';await $('videoPlayer').play().catch(()=>{});}catch(e){toast('Pregled nije dostupan: '+(e.message||e))}}
-for(let host of ['recentHome','vaultList']){$(host).addEventListener('click',e=>{let x=e.target.closest('[data-file-id]');if(x)openFile(x.dataset.fileId)});$(host).addEventListener('keydown',e=>{let x=e.target.closest('[data-file-id]');if(x&&e.key==='Enter')openFile(x.dataset.fileId)})}
-function closeFile(){state.currentId=null;$('videoPlayer').pause();$('videoPlayer').removeAttribute('src');$('videoPlayer').load();$('videoPlayer').style.display='none';$('overlay').classList.remove('open');$('overlay').setAttribute('aria-hidden','true');if(isAndroid())native('purgePreview').catch(()=>{})}
-$('closeModal').onclick=closeFile;$('overlay').onclick=e=>{if(e.target===$('overlay'))closeFile()};
-$('exportModal').onclick=async()=>{const id=state.currentId;if(!id)return;if(!confirm('Izvesti MP4 kopiju u javnu galeriju? Kopija više neće biti šifrirana.'))return;try{let r=await native('export',{id});toast('Izvezeno u galeriju: '+r.name);closeFile()}catch(e){toast('Izvoz nije uspio: '+(e.message||e))}};
+async function openFile(id){
+ const f=state.files.find(x=>x.id===id);if(!f)return;
+ state.currentId=id;
+ $('modalTitle').textContent=f.name;
+ $('modalInfo').textContent='Snimak je šifriran i nije u galeriji. Za reprodukciju koristi Android video-player; izvoz pravi običan MP4.';
+ $('modalType').textContent=f.type==='screen'?'Ekran':(f.lens==='front'?'Prednja kamera':'Zadnja kamera');
+ $('modalDuration').textContent=tformat(f.durationSec);
+ $('modalStatus').hidden=true;$('modalStatus').textContent='';
+ $('overlay').classList.add('open');$('overlay').setAttribute('aria-hidden','false');
+}
+async function exportFile(id){
+ if(!isAndroid()){toast('Izvoz radi samo u Android aplikaciji.');return}
+ const f=state.files.find(x=>x.id===id);if(!f)return toast('Snimak nije pronađen u sefu. Provjeri obnovu snimaka.');
+ if(!confirm('Izvesti '+f.name+' u galeriju? Kopija više neće biti šifrirana.'))return;
+ const btn=$('exportModal');btn.disabled=true;
+ try{
+   const r=await native('export',{id});
+   const text='MP4 izvezen bez promjene kvaliteta: '+r.name+'. Potraži Movies/Calculator Exports.';
+   toast(text);if(state.currentId===id)closeFile();
+ }catch(e){
+   const msg='Izvoz nije uspio: '+(e.message||e);toast(msg);
+   if($('overlay').classList.contains('open')){$('modalStatus').hidden=false;$('modalStatus').textContent=msg;}
+ }finally{btn.disabled=false}
+}
+for(const host of ['recentHome','vaultList']){
+ $(host).addEventListener('click',e=>{
+   const ex=e.target.closest('[data-export-id]');
+   if(ex){e.stopPropagation();exportFile(ex.dataset.exportId);return}
+   const x=e.target.closest('[data-file-id]');if(x)openFile(x.dataset.fileId);
+ });
+ $(host).addEventListener('keydown',e=>{
+   const b=e.target.closest('[data-export-id]');if(b&&(e.key==='Enter'||e.key===' ')){e.preventDefault();e.stopPropagation();exportFile(b.dataset.exportId);return}
+   const x=e.target.closest('[data-file-id]');if(x&&e.key==='Enter'){e.preventDefault();openFile(x.dataset.fileId)}
+ });
+}
+function closeFile(){
+ state.currentId=null;
+ $('overlay').classList.remove('open');$('overlay').setAttribute('aria-hidden','true');
+ $('modalStatus').hidden=true;$('modalStatus').textContent='';
+ // PreviewActivity alone owns and deletes its temporary decrypted MP4 on exit.
+}
+$('closeModal').onclick=closeFile;
+$('overlay').onclick=e=>{if(e.target===$('overlay'))closeFile()};
+$('playModal').onclick=async()=>{
+ const id=state.currentId;if(!id)return;
+ if(!isAndroid())return toast('Pregled je dostupan u instaliranoj Android aplikaciji.');
+ const btn=$('playModal');btn.disabled=true;btn.textContent='Otvaranje video-playera...';
+ $('modalStatus').hidden=false;$('modalStatus').textContent='Dešifriranje u privatnu memoriju; original ostaje u sefu.';
+ try{
+   state.openingPlayer=true;await native('play',{id});
+   $('modalStatus').textContent='Video-player je otvoren.';
+ }catch(e){
+   state.openingPlayer=false;const msg='Pregled nije uspio: '+(e.message||e);
+   $('modalStatus').textContent=msg;toast(msg);
+ }finally{btn.disabled=false;btn.textContent='▶ Pusti video u aplikaciji'}
+};
+$('exportModal').onclick=()=>{if(state.currentId)exportFile(state.currentId)};
 $('saveSecret').onclick=()=>{let x=$('secretInput').value.replace(/\s/g,'').replaceAll('×','*').replaceAll('÷','/');if(!/^[\d.+*/-]{3,40}$/.test(x)||evalCalc(x)===null){toast('Unesi važeću kombinaciju, npr. 73+27');return}state.secret=x;try{localStorage.setItem('calculator_secret_v2',x)}catch{}toast('Kombinacija sačuvana.')};
 $('resetDemo').textContent='Obriši sve snimke (uz potvrdu)';
 $('resetDemo').onclick=async()=>{if(!state.files.length){toast('Nema snimaka za brisanje.');return}if(!confirm('Trajno obrisati sve šifrirane snimke iz sefa?'))return;try{await native('deleteAll');toast('Snimci obrisani.');await refresh()}catch(e){toast(String(e.message||e))}};
 $('autolockSetting').onchange=()=>toast('Automatsko zaključavanje ažurirano.');
 let lastTouch=0;function signalActivity(){if(!isAndroid())return;let now=Date.now();if(now-lastTouch<5000)return;lastTouch=now;native('touch').catch(()=>{})}
 document.addEventListener('pointerdown',signalActivity,{passive:true});document.addEventListener('keydown',signalActivity);
-document.addEventListener('visibilitychange',()=>{if(document.hidden){if(unlocked&&$('autolockSetting').checked)lock();if($('overlay').classList.contains('open'))closeFile()}else refresh()});
+document.addEventListener('visibilitychange',()=>{if(document.hidden){if(!state.openingPlayer){if(unlocked&&$('autolockSetting').checked)lock();if($('overlay').classList.contains('open'))closeFile()}}else{state.openingPlayer=false;refresh()}});
 function showCaptureInfo(message){
  for(const id of ['captureWarning','vaultWarning']){
    const el=$(id);el.hidden=!message;el.textContent=message||'';
