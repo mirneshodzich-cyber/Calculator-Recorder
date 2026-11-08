@@ -33,11 +33,19 @@ function lock(){if(state.transfer){toast('Prvo završi ili prekini obradu snimka
 $('keypad').addEventListener('click',e=>{let b=e.target.closest('[data-key]');if(b)calcPress(b.dataset.key)});
 document.addEventListener('keydown',e=>{if(unlocked||['INPUT','TEXTAREA'].includes(document.activeElement?.tagName))return;let k=e.key;if(/^[0-9.]$/.test(k)||['+','-','*','/','%'].includes(k)){calcPress(k);e.preventDefault()}else if(k==='Enter'||k==='='){calcPress('=');e.preventDefault()}else if(k==='Escape'){calcPress('C');e.preventDefault()}else if(k==='Backspace'){calcPress('DEL');e.preventDefault()}});
 $('calcMenu').onclick=()=>toast('Calculator • privatni prikaz');
-function tab(name){state.tab=name;const labels={home:'Kontrolni centar',vault:'Privatni sef',settings:'Postavke'};for(let k of Object.keys(labels))$('screen'+k[0].toUpperCase()+k.slice(1)).style.display=k===name?'block':'none';$('pageHeading').textContent=labels[name];document.querySelectorAll('.nav-btn').forEach(x=>x.classList.toggle('active',x.dataset.tab===name));if(name==='settings')$('secretInput').value=state.secret;if(name==='vault')renderFiles()}
+function tab(name){state.tab=name;const labels={home:'Kontrolni centar',vault:'Privatni sef',settings:'Postavke'};for(let k of Object.keys(labels))$('screen'+k[0].toUpperCase()+k.slice(1)).style.display=k===name?'block':'none';$('pageHeading').textContent=labels[name];document.querySelectorAll('.nav-btn').forEach(x=>x.classList.toggle('active',x.dataset.tab===name));if(name==='settings'){$('secretInput').value=state.secret;if(isAndroid())native('getNoticeLabel').then(x=>{$('notificationName').value=x.label||'Calculator'}).catch(()=>{});}if(name==='vault')renderFiles()}
 document.querySelectorAll('.nav-btn').forEach(x=>x.addEventListener('click',()=>tab(x.dataset.tab)));
 $('openVaultQuick').onclick=()=>tab('vault');$('seeAll').onclick=()=>tab('vault');$('hideQuick').onclick=lock;$('lockNow').onclick=lock;
-function setMode(m){if(state.active||state.preparing||state.saving){toast('Pričekaj završetak snimanja i spremanja.');return}state.mode=m;$('cameraMode').classList.toggle('selected',m==='camera');$('screenMode').classList.toggle('selected',m==='screen');$('lensRow').style.display=m==='camera'?'flex':'none';$('recordDescription').textContent=m==='screen'?'Android će zatražiti odobrenje snimanja ekrana pri svakom pokretanju.':'Odaberi prednju ili zadnju kameru. Snimanje se nastavlja u pozadini uz sistemsku obavijest.'}
-$('cameraMode').onclick=()=>setMode('camera');$('screenMode').onclick=()=>setMode('screen');
+function setMode(m){
+ if(state.active||state.preparing||state.saving){toast('Pričekaj završetak snimanja i spremanja.');return}
+ state.mode=m;
+ for(const mode of ['camera','screen','audio'])$(mode+'Mode').classList.toggle('selected',m===mode);
+ $('lensRow').style.display=m==='camera'?'flex':'none';
+ $('recordDescription').textContent=m==='audio'?'Diktafon snima AAC zvuk u M4A formatu (48 kHz, 256 kbps), uz obavijest o snimanju.':
+   m==='screen'?'Android će tražiti novu dozvolu za snimanje ekrana pri svakom pokretanju.':
+   'Odaberi prednju ili zadnju kameru. Snimanje se nastavlja u pozadini uz vidljivu sistemsku obavijest.';
+}
+$('cameraMode').onclick=()=>setMode('camera');$('screenMode').onclick=()=>setMode('screen');$('audioMode').onclick=()=>setMode('audio');
 function setLens(l){if(state.active||state.preparing){toast('Za promjenu kamere prvo zaustavi snimanje.');return}state.lens=l;$('lensBack').classList.toggle('selected',l==='back');$('lensFront').classList.toggle('selected',l==='front')}
 $('lensBack').onclick=()=>setLens('back');$('lensFront').onclick=()=>setLens('front');
 function renderRecord(){
@@ -45,7 +53,7 @@ function renderRecord(){
  $('recordTimer').textContent=tformat(s);$('recordPanel').classList.toggle('is-recording',state.active);
  $('recordState').textContent=state.saving?'ŠIFRIRANJE SNIMKA':state.preparing?'PRIPREMA KAMERE / EKRANA':state.active?'SNIMANJE U TOKU':'SPREMNO ZA SNIMANJE';
  $('recordTitle').textContent=state.saving?'Spremanje u sef...':state.preparing?'Priprema snimanja...':state.active?'Snimanje aktivno':'Pokreni snimanje';
- if(state.active)$('recordDescription').textContent='Snimanje traje uz obavijest 正在录制视频. Automatski prestaje 90 minuta nakon izlaska iz aplikacije.';
+ if(state.active)$('recordDescription').textContent='Snimanje je aktivno uz sistemsku obavijest. Automatski prestaje 90 minuta nakon izlaska iz aplikacije.';
  $('recordButton').classList.toggle('stop',state.active);
  $('recordButton').innerHTML=state.saving?'Pričekaj, snimak se šifrira...':state.preparing?'Priprema snimanja...':state.active?'■ &nbsp; Zaustavi snimanje':'● &nbsp; Započni snimanje';
  $('recordButton').disabled=state.saving||state.preparing;
@@ -53,11 +61,11 @@ function renderRecord(){
 $('recordButton').onclick=async()=>{
  if(!isAndroid()){toast('Ovo je pregled dizajna. Stvarno snimanje dostupno je u instaliranoj Android aplikaciji.');return}
  $('recordButton').disabled=true;
- try{const stopping=state.active;if(stopping)await native('stop');else await native(state.mode==='camera'?'startCamera':'startScreen',state.mode==='camera'?{lens:state.lens}:{});await refresh();toast(stopping?'Snimanje se zaustavlja; snimak se pohranjuje u sef.':'Pokretanje zatraženo. Android će prikazati status snimanja.')}catch(e){toast('Greška: '+(e.message||e))}finally{$('recordButton').disabled=state.saving||state.preparing}
+ try{const stopping=state.active;if(stopping)await native('stop');else await native(state.mode==='camera'?'startCamera':state.mode==='audio'?'startAudio':'startScreen',state.mode==='camera'?{lens:state.lens}:{});await refresh();toast(stopping?'Snimanje se zaustavlja; snimak se pohranjuje u sef.':'Pokretanje zatraženo. Android će prikazati status snimanja.')}catch(e){toast('Greška: '+(e.message||e))}finally{$('recordButton').disabled=state.saving||state.preparing}
 };
 function videoIcon(){return '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="13" height="14" rx="2"/><path d="m16 10 5-3v10l-5-3"/></svg>'}
 function fileMarkup(f){const busy=state.transfer||state.deletingId||state.active||state.saving;
-return `<div class="file-row tap-row" data-file-id="${esc(f.id)}" tabindex="0" role="button"><div class="file-icon">${videoIcon()}</div><div class="file-main"><div class="file-title">${esc(f.name)}</div><div class="file-meta">${f.type==='screen'?'Ekran':(f.lens==='front'?'Prednja kamera':'Zadnja kamera')} · ${tformat(f.durationSec)} · ${new Date(f.createdAt).toLocaleDateString('bs-BA')}</div><div class="size-label">${Number(f.sizeBytes/1048576).toFixed(1)} MB · šifrirano</div></div><div class="file-buttons"><button class="row-button" type="button" data-export-id="${esc(f.id)}" ${busy?'disabled aria-disabled="true"':''}>Izvoz</button><button class="row-delete" type="button" data-delete-id="${esc(f.id)}" aria-label="Obriši ${esc(f.name)}" ${busy?'disabled aria-disabled="true"':''}>✕</button></div></div>`}
+return `<div class="file-row tap-row" data-file-id="${esc(f.id)}" tabindex="0" role="button"><div class="file-icon">${f.type==='audio'?'♫':videoIcon()}</div><div class="file-main"><div class="file-title">${esc(f.name)}</div><div class="file-meta">${f.type==='audio'?'Diktafon':f.type==='screen'?'Ekran':(f.lens==='front'?'Prednja kamera':'Zadnja kamera')} · ${tformat(f.durationSec)} · ${new Date(f.createdAt).toLocaleDateString('bs-BA')}</div><div class="size-label">${Number(f.sizeBytes/1048576).toFixed(1)} MB · šifrirano</div></div><div class="file-buttons"><button class="row-button" type="button" data-export-id="${esc(f.id)}" ${busy?'disabled aria-disabled="true"':''}>Izvoz</button><button class="row-delete" type="button" data-delete-id="${esc(f.id)}" aria-label="Obriši ${esc(f.name)}" ${busy?'disabled aria-disabled="true"':''}>✕</button></div></div>`}
 function renderFiles(){let a=state.files;let filtered=a.filter(f=>f.name.toLowerCase().includes(($('fileSearch').value||'').toLowerCase()));$('fileCountHome').textContent=a.length+' zapisa';$('vaultFileCount').textContent=a.length+' datoteka';$('recentHome').innerHTML=a.length?a.slice(0,3).map(fileMarkup).join(''):'<div class="empty">Još nema snimaka. Pokreni snimanje u Android aplikaciji.</div>';$('vaultList').innerHTML=filtered.length?filtered.map(fileMarkup).join(''):'<div class="empty">Nema zapisa za prikaz.</div>'}
 $('fileSearch').addEventListener('input',renderFiles);
 $('diagnoseVault').onclick=async()=>{
@@ -67,17 +75,18 @@ $('diagnoseVault').onclick=async()=>{
    let mb=b=>(Number(b||0)/1048576).toFixed(1)+' MB';
    $('diagnosticsOutput').hidden=false;
    $('diagnosticsOutput').textContent='Šifrirani fajlovi: '+d.encryptedCount+' | Evidentirani: '+d.indexedCount+'\n'
-     +'Privremeni MP4: '+d.pendingCount+' ('+mb(d.pendingBytes)+')\n'
+     +'Privremeni MP4/M4A: '+d.pendingCount+' ('+mb(d.pendingBytes)+')\n'
      +'Nedovršeni šifrirani fajlovi: '+d.incompleteCount+'\n'
      +'Slobodno u memoriji: '+mb(d.usableBytes)+'\n'
-     +'Zadnji MP4 pokušaj: '+mb(d.lastRawBytes)+'\n'
+     +'Putanja šifriranih datoteka: '+(d.storagePath||'nije dostupno')+'\n'
+     +'Zadnji snimak: '+mb(d.lastRawBytes)+'\n'
      +'Zadnja greška: '+(d.lastError||'Nije prijavljena');
  }catch(e){toast('Dijagnostika: '+(e.message||e));}
 };
 $('recoverRecords').onclick=async()=>{
  if(!isAndroid())return toast('Oporavak je dostupan u Android aplikaciji.');
  const btn=$('recoverRecords');btn.disabled=true;btn.textContent='Tražim preostale snimke...';
- try{const r=await native('recover');await refresh();toast(r.recovered?`Obnovljeno: ${r.recovered}. Preostalo: ${r.remaining}.`:`Nema obnovljivih MP4 snimaka. Preostale neispravne datoteke: ${r.remaining}.`)}
+ try{const r=await native('recover');await refresh();toast(r.recovered?`Obnovljeno: ${r.recovered}. Preostalo: ${r.remaining}.`:`Nema obnovljivih snimaka. Preostale neispravne datoteke: ${r.remaining}.`)}
  catch(e){toast('Oporavak nije uspio: '+(e.message||e))}
  finally{btn.disabled=false;btn.textContent='Provjeri i obnovi pronađene snimke'}
 };
@@ -85,8 +94,8 @@ async function openFile(id){
  const f=state.files.find(x=>x.id===id);if(!f)return;
  state.currentId=id;
  $('modalTitle').textContent=f.name;
- $('modalInfo').textContent='Snimak je šifriran i nije u galeriji. Za reprodukciju koristi Android video-player; izvoz pravi običan MP4.';
- $('modalType').textContent=f.type==='screen'?'Ekran':(f.lens==='front'?'Prednja kamera':'Zadnja kamera');
+ $('modalInfo').textContent='Zapis je AES-GCM šifriran (.cjn). Pregled radi u privatnom Android playeru; izvoz pravi '+(f.type==='audio'?'M4A audio':'MP4 video')+' bez dodatne kompresije.';
+ $('modalType').textContent=f.type==='audio'?'Diktafon':f.type==='screen'?'Ekran':(f.lens==='front'?'Prednja kamera':'Zadnja kamera');
  $('modalDuration').textContent=tformat(f.durationSec);
  $('modalStatus').hidden=true;$('modalStatus').textContent='';
  $('overlay').classList.add('open');$('overlay').setAttribute('aria-hidden','false');
@@ -122,7 +131,7 @@ async function pollTransfer(t){
      }
      const since=Date.now()-Number(status.lastProgressAt||Date.now());
      if(since>12000&&!t.canceling){
-       $('transferStage').textContent='Android obrađuje veliki video. Možeš prekinuti operaciju.';
+       $('transferStage').textContent='Android obrađuje veliki snimak. Možeš prekinuti operaciju.';
      }
    } else if(t.seenActive){
      t.inactivePolls=(t.inactivePolls||0)+1;
@@ -171,7 +180,7 @@ async function runTransfer(kind,id){
    const result=await native(isExport?'export':'play',{id});
    if(t.finished)return;
    if(isExport){
-     toast('Izvezeno bez promjene kvaliteta: '+result.name+' · Movies/Calculator Exports');
+     toast('Izvezeno bez promjene kvaliteta: '+result.name+' · '+(f.type==='audio'?'Music':'Movies')+'/Calculator Exports');
      if(state.currentId===id)closeFile();
    }else{
      $('modalStatus').hidden=false;$('modalStatus').textContent='Video-player je otvoren.';
@@ -191,7 +200,7 @@ function exportFile(id){
  if(state.transfer)return toast('Izvoz ili otvaranje drugog snimka je već u toku.');
  const f=state.files.find(x=>x.id===id);if(!f)return toast('Snimak nije pronađen u sefu.');
  if(!isAndroid())return toast('Izvoz radi samo u Android aplikaciji.');
- if(!confirm('Izvesti '+f.name+' u galeriju? Kopija više neće biti šifrirana.'))return;
+ if(!confirm('Izvesti '+f.name+' kao '+(f.type==='audio'?'M4A':'MP4')+'? Kopija više neće biti šifrirana.'))return;
  runTransfer('export',id);
 }
 $('cancelTransfer').onclick=async()=>{
@@ -252,6 +261,13 @@ $('playModal').onclick=()=>{if(state.currentId)runTransfer('play',state.currentI
 $('exportModal').onclick=()=>{if(state.currentId)exportFile(state.currentId)};
 $('deleteModal').onclick=()=>{if(state.currentId)deleteFile(state.currentId)};
 $('saveSecret').onclick=()=>{let x=$('secretInput').value.replace(/\s/g,'').replaceAll('×','*').replaceAll('÷','/');if(!/^[\d.+*/-]{3,40}$/.test(x)||evalCalc(x)===null){toast('Unesi važeću kombinaciju, npr. 73+27');return}state.secret=x;try{localStorage.setItem('calculator_secret_v2',x)}catch{}toast('Kombinacija sačuvana.')};
+$('saveNotificationName').onclick=async()=>{
+ const label=$('notificationName').value.trim();
+ if(label.length<1||label.length>36||/[\r\n]/.test(label)){toast('Naziv mora imati 1–36 znakova.');return}
+ if(!isAndroid()){toast('Naziv se može promijeniti u instaliranoj Android aplikaciji.');return}
+ try{await native('setNoticeLabel',{label});toast('Naziv spremljen. Primjenjuje se odmah, uključujući aktivnu obavijest. Status snimanja uvijek ostaje prikazan.');}
+ catch(e){toast('Greška: '+(e.message||e))}
+};
 $('resetDemo').textContent='Obriši sve snimke (uz potvrdu)';
 $('resetDemo').onclick=async()=>{if(!state.files.length){toast('Nema snimaka za brisanje.');return}if(!confirm('Trajno obrisati sve šifrirane snimke iz sefa?'))return;try{await native('deleteAll');toast('Snimci obrisani.');await refresh()}catch(e){toast(String(e.message||e))}};
 $('autolockSetting').onchange=()=>toast('Automatsko zaključavanje ažurirano.');
