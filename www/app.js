@@ -1,6 +1,6 @@
 (()=>{'use strict';
 const $=id=>document.getElementById(id);
-const state={secret:'73+27',tab:'home',mode:'camera',lens:'back',files:[],active:false,saving:false,lastSavedAt:0,lastError:'',unprocessedFiles:0,synced:false,startedAt:0,currentId:null,preview:null};
+const state={secret:'73+27',tab:'home',mode:'camera',lens:'back',files:[],active:false,preparing:false,saving:false,lastSavedAt:0,lastError:'',unprocessedFiles:0,synced:false,startedAt:0,currentId:null,preview:null};
 try{const v=localStorage.getItem('calculator_secret_v2');if(v&&/^[0-9.+*/-]{3,40}$/.test(v))state.secret=v}catch{}
 const isAndroid=()=>!!(window.Capacitor&&window.Capacitor.isNativePlatform&&window.Capacitor.isNativePlatform());
 const native=(method,args={})=>{
@@ -36,29 +36,43 @@ $('calcMenu').onclick=()=>toast('Calculator • privatni prikaz');
 function tab(name){state.tab=name;const labels={home:'Kontrolni centar',vault:'Privatni sef',settings:'Postavke'};for(let k of Object.keys(labels))$('screen'+k[0].toUpperCase()+k.slice(1)).style.display=k===name?'block':'none';$('pageHeading').textContent=labels[name];document.querySelectorAll('.nav-btn').forEach(x=>x.classList.toggle('active',x.dataset.tab===name));if(name==='settings')$('secretInput').value=state.secret;if(name==='vault')renderFiles()}
 document.querySelectorAll('.nav-btn').forEach(x=>x.addEventListener('click',()=>tab(x.dataset.tab)));
 $('openVaultQuick').onclick=()=>tab('vault');$('seeAll').onclick=()=>tab('vault');$('hideQuick').onclick=lock;$('lockNow').onclick=lock;
-function setMode(m){if(state.active||state.saving){toast('Pričekaj završetak snimanja i spremanja.');return}state.mode=m;$('cameraMode').classList.toggle('selected',m==='camera');$('screenMode').classList.toggle('selected',m==='screen');$('lensRow').style.display=m==='camera'?'flex':'none';$('recordDescription').textContent=m==='screen'?'Android će zatražiti odobrenje snimanja ekrana pri svakom pokretanju.':'Odaberi prednju ili zadnju kameru. Snimanje se nastavlja u pozadini uz sistemsku obavijest.'}
+function setMode(m){if(state.active||state.preparing||state.saving){toast('Pričekaj završetak snimanja i spremanja.');return}state.mode=m;$('cameraMode').classList.toggle('selected',m==='camera');$('screenMode').classList.toggle('selected',m==='screen');$('lensRow').style.display=m==='camera'?'flex':'none';$('recordDescription').textContent=m==='screen'?'Android će zatražiti odobrenje snimanja ekrana pri svakom pokretanju.':'Odaberi prednju ili zadnju kameru. Snimanje se nastavlja u pozadini uz sistemsku obavijest.'}
 $('cameraMode').onclick=()=>setMode('camera');$('screenMode').onclick=()=>setMode('screen');
-function setLens(l){if(state.active){toast('Za promjenu kamere prvo zaustavi snimanje.');return}state.lens=l;$('lensBack').classList.toggle('selected',l==='back');$('lensFront').classList.toggle('selected',l==='front')}
+function setLens(l){if(state.active||state.preparing){toast('Za promjenu kamere prvo zaustavi snimanje.');return}state.lens=l;$('lensBack').classList.toggle('selected',l==='back');$('lensFront').classList.toggle('selected',l==='front')}
 $('lensBack').onclick=()=>setLens('back');$('lensFront').onclick=()=>setLens('front');
 function renderRecord(){
  const s=state.active?Math.max(0,(Date.now()-state.startedAt)/1000):0;
  $('recordTimer').textContent=tformat(s);$('recordPanel').classList.toggle('is-recording',state.active);
- $('recordState').textContent=state.saving?'ŠIFRIRANJE SNIMKA':state.active?'SNIMANJE U TOKU':'SPREMNO ZA SNIMANJE';
- $('recordTitle').textContent=state.saving?'Spremanje u sef...':state.active?'Snimanje aktivno':'Pokreni snimanje';
+ $('recordState').textContent=state.saving?'ŠIFRIRANJE SNIMKA':state.preparing?'PRIPREMA KAMERE / EKRANA':state.active?'SNIMANJE U TOKU':'SPREMNO ZA SNIMANJE';
+ $('recordTitle').textContent=state.saving?'Spremanje u sef...':state.preparing?'Priprema snimanja...':state.active?'Snimanje aktivno':'Pokreni snimanje';
  if(state.active)$('recordDescription').textContent='Snimanje traje uz obavijest 正在录制视频. Automatski prestaje poslije 20 minuta neaktivnosti.';
  $('recordButton').classList.toggle('stop',state.active);
- $('recordButton').innerHTML=state.saving?'Pričekaj, snimak se šifrira...':state.active?'■ &nbsp; Zaustavi snimanje':'● &nbsp; Započni snimanje';
- $('recordButton').disabled=state.saving;
+ $('recordButton').innerHTML=state.saving?'Pričekaj, snimak se šifrira...':state.preparing?'Priprema snimanja...':state.active?'■ &nbsp; Zaustavi snimanje':'● &nbsp; Započni snimanje';
+ $('recordButton').disabled=state.saving||state.preparing;
 }
 $('recordButton').onclick=async()=>{
  if(!isAndroid()){toast('Ovo je pregled dizajna. Stvarno snimanje dostupno je u instaliranoj Android aplikaciji.');return}
  $('recordButton').disabled=true;
- try{const stopping=state.active;if(stopping)await native('stop');else await native(state.mode==='camera'?'startCamera':'startScreen',state.mode==='camera'?{lens:state.lens}:{});await refresh();toast(stopping?'Snimanje se zaustavlja; snimak se pohranjuje u sef.':'Pokretanje zatraženo. Android će prikazati status snimanja.')}catch(e){toast('Greška: '+(e.message||e))}finally{$('recordButton').disabled=state.saving}
+ try{const stopping=state.active;if(stopping)await native('stop');else await native(state.mode==='camera'?'startCamera':'startScreen',state.mode==='camera'?{lens:state.lens}:{});await refresh();toast(stopping?'Snimanje se zaustavlja; snimak se pohranjuje u sef.':'Pokretanje zatraženo. Android će prikazati status snimanja.')}catch(e){toast('Greška: '+(e.message||e))}finally{$('recordButton').disabled=state.saving||state.preparing}
 };
 function videoIcon(){return '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="13" height="14" rx="2"/><path d="m16 10 5-3v10l-5-3"/></svg>'}
 function fileMarkup(f){return `<div class="file-row tap-row" data-file-id="${esc(f.id)}" tabindex="0" role="button"><div class="file-icon">${videoIcon()}</div><div class="file-main"><div class="file-title">${esc(f.name)}</div><div class="file-meta">${f.type==='screen'?'Ekran':(f.lens==='front'?'Prednja kamera':'Zadnja kamera')} · ${tformat(f.durationSec)} · ${new Date(f.createdAt).toLocaleDateString('bs-BA')}</div><div class="size-label">${Number(f.sizeBytes/1048576).toFixed(1)} MB · šifrirano</div></div><span class="lock-mini">◆</span><span class="file-action">›</span></div>`}
 function renderFiles(){let a=state.files;let filtered=a.filter(f=>f.name.toLowerCase().includes(($('fileSearch').value||'').toLowerCase()));$('fileCountHome').textContent=a.length+' zapisa';$('vaultFileCount').textContent=a.length+' datoteka';$('recentHome').innerHTML=a.length?a.slice(0,3).map(fileMarkup).join(''):'<div class="empty">Još nema snimaka. Pokreni snimanje u Android aplikaciji.</div>';$('vaultList').innerHTML=filtered.length?filtered.map(fileMarkup).join(''):'<div class="empty">Nema zapisa za prikaz.</div>'}
 $('fileSearch').addEventListener('input',renderFiles);
+$('diagnoseVault').onclick=async()=>{
+ if(!isAndroid())return toast('Dijagnostika radi u Android aplikaciji.');
+ try{
+   let d=await native('diagnostics');
+   let mb=b=>(Number(b||0)/1048576).toFixed(1)+' MB';
+   $('diagnosticsOutput').hidden=false;
+   $('diagnosticsOutput').textContent='Šifrirani fajlovi: '+d.encryptedCount+' | Evidentirani: '+d.indexedCount+'\n'
+     +'Privremeni MP4: '+d.pendingCount+' ('+mb(d.pendingBytes)+')\n'
+     +'Nedovršeni šifrirani fajlovi: '+d.incompleteCount+'\n'
+     +'Slobodno u memoriji: '+mb(d.usableBytes)+'\n'
+     +'Zadnji MP4 pokušaj: '+mb(d.lastRawBytes)+'\n'
+     +'Zadnja greška: '+(d.lastError||'Nije prijavljena');
+ }catch(e){toast('Dijagnostika: '+(e.message||e));}
+};
 $('recoverRecords').onclick=async()=>{
  if(!isAndroid())return toast('Oporavak je dostupan u Android aplikaciji.');
  const btn=$('recoverRecords');btn.disabled=true;btn.textContent='Tražim preostale snimke...';
@@ -90,7 +104,8 @@ async function refresh(){
  try{
    const [s,files]=await Promise.all([native('status'),native('list')]);
    const oldSaved=state.lastSavedAt;
-   state.active=!!s.recording;
+   state.active=!!s.recording&&!s.preparing;
+   state.preparing=!!s.preparing;
    state.saving=!!s.saving;
    state.startedAt=s.startedAt||0;
    state.files=Array.isArray(files.files)?files.files:[];
@@ -102,6 +117,7 @@ async function refresh(){
    let notice='';
    if(state.lastError)notice='Greška snimanja/spremanja: '+state.lastError;
    else if(state.saving)notice='Snimanje je zaustavljeno. Šifriranje i spremanje u sef još traju. Nemoj zatvarati aplikaciju prisilno.';
+   else if(state.preparing)notice='Android još priprema kameru/ekran. Snimanje zapravo nije počelo dok se ne pojavi status SNIMANJE U TOKU.';
    if(state.unprocessedFiles && !state.active && !state.saving){
      notice+=(notice?'\n':'')+'Preostale privatne datoteke: '+state.unprocessedFiles+'. Klikni „Provjeri i obnovi pronađene snimke” u sefu.';
    }

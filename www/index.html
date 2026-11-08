@@ -67,6 +67,8 @@ body,button,input,select{font-family:Manrope,Inter,system-ui,-apple-system,sans-
     <section class="main-scroll" id="screenVault" style="display:none">
       <div class="demo-bar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 11v6m0-10h.01"/></svg><span>Snimci se čuvaju u privatnom šifriranom sefu i nisu vidljivi u galeriji. Izvoz je dobrovoljan.</span></div>
       <div id="vaultWarning" class="capture-alert" hidden role="alert"></div>
+      <button class="setting-action" id="diagnoseVault" style="width:100%;margin-bottom:10px">Dijagnostika snimanja i sefa</button>
+      <div id="diagnosticsOutput" class="capture-alert" hidden style="white-space:pre-wrap;margin-bottom:14px"></div>
       <button class="setting-action" id="recoverRecords" style="width:100%;margin-bottom:14px">Provjeri i obnovi pronađene snimke</button>
       <div class="vault-summary"><div><strong id="vaultFileCount">0 datoteka</strong><br><span>Zaštićena pohrana • dizajn</span></div><svg width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="#a5e6d1" stroke-width="1.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg></div>
       <div class="search-wrap"><label for="fileSearch" class="sr-only">Pretraga snimaka</label><input class="search" id="fileSearch" placeholder="Pretraži zapise..."></div><div class="vault-list" id="vaultList"></div>
