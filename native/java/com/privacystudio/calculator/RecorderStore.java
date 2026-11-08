@@ -143,17 +143,28 @@ public final class RecorderStore {
             if(encrypted!=null) for(File file:encrypted){
                 String id=file.getName().substring(7,file.getName().length()-4);
                 if(!id.matches("[A-Za-z0-9_-]{1,96}")||ids.contains(id))continue;
-                JSONObject record=new JSONObject();
-                record.put("id",id);record.put("name","RECOVERED_"+file.lastModified()+".mp4");
-                record.put("type","recovered");record.put("lens","unknown");
-                record.put("durationSec",0);record.put("createdAt",file.lastModified());
-                record.put("width",0);record.put("height",0);
-                record.put("sizeBytes",Math.max(0L,file.length()-32L));
+                JSONObject record=recoveredEntry(id,file.length(),file.lastModified());
                 found.put(record);ids.add(id);changed=true;
+            }
+            if(SharedVault.configured(context)){
+                SharedVault folder=new SharedVault(context);
+                for(SharedVault.Item item:folder.list()){
+                    if(!item.name.startsWith("system_")||!item.name.endsWith(".cjn"))continue;
+                    String id=item.name.substring(7,item.name.length()-4);
+                    if(!id.matches("[A-Za-z0-9_-]{1,96}")||ids.contains(id))continue;
+                    found.put(recoveredEntry(id,item.size,System.currentTimeMillis()));ids.add(id);changed=true;
+                }
             }
             if(changed)writeIndex(found);
             return found;
         }
+    }
+    private JSONObject recoveredEntry(String id,long length,long created)throws Exception {
+        JSONObject record=new JSONObject();record.put("id",id);record.put("name","RECOVERED_"+id+".mp4");
+        record.put("type","recovered");record.put("lens","unknown");
+        record.put("durationSec",0);record.put("createdAt",created);
+        record.put("width",0);record.put("height",0);record.put("sizeBytes",Math.max(0L,length-32L));
+        return record;
     }
     public JSONArray list()throws Exception{return repairIndex();}
     public synchronized JSONObject find(String id)throws Exception {
@@ -164,29 +175,58 @@ public final class RecorderStore {
         }
         throw new IllegalArgumentException("Nepoznat snimak.");
     }
-    private File encryptedFile(String id){
+    private File legacyEncryptedFile(String id){
         if(id==null||!id.matches("[A-Za-z0-9_-]{1,96}"))throw new IllegalArgumentException("Neispravan ID snimka.");
         File modern=new File(payloadVault,"system_"+id+".cjn");
         if(modern.exists())return modern;
         File old=new File(vault,id+".svr");
         return old.exists()?old:modern;
     }
+    private static final class Blob {
+        final File file;final android.net.Uri uri;final SharedVault shared;final long size;
+        Blob(File f){file=f;uri=null;shared=null;size=f.length();}
+        Blob(SharedVault sf,SharedVault.Item item)throws Exception{
+            file=null;uri=item.uri;shared=sf;
+            if(item.size>0){size=item.size;}else{
+                long measured=0;byte[] buf=new byte[256*1024];int n;
+                try(InputStream in=sf.input(item.uri)){while((n=in.read(buf))!=-1)measured+=n;}
+                size=measured;
+            }
+        }
+        InputStream input()throws Exception{return file!=null?new FileInputStream(file):shared.input(uri);}
+        void remove()throws Exception{
+            if(file!=null){if(file.exists()&&!file.delete())throw new IOException("Ne mogu obrisati šifrirani fajl.");}
+            else shared.remove(uri);
+        }
+    }
+    private Blob encryptedBlob(String id)throws Exception {
+        if(id==null||!id.matches("[A-Za-z0-9_-]{1,96}"))throw new IllegalArgumentException("Neispravan ID snimka.");
+        if(SharedVault.configured(context)){
+            SharedVault sv=new SharedVault(context);
+            SharedVault.Item item=sv.find("system_"+id+".cjn");
+            if(item!=null)return new Blob(sv,item);
+        }
+        File legacy=legacyEncryptedFile(id);
+        if(legacy.exists())return new Blob(legacy);
+        throw new IOException("Šifrirani snimak nedostaje. Provjeri odabrani folder u postavkama.");
+    }
     private static final SecureRandom RANDOM=new SecureRandom();
-    private String nextId(){
+    private String nextId()throws Exception{
         for(int i=0;i<20;i++){
             String id=Long.toString(10000000000L+Math.floorMod(RANDOM.nextLong(),89999999999L));
-            if(!new File(payloadVault,"system_"+id+".cjn").exists())return id;
+            if(!new File(payloadVault,"system_"+id+".cjn").exists() && (!SharedVault.configured(context) || new SharedVault(context).find("system_"+id+".cjn")==null))return id;
         }
         throw new IllegalStateException("Nije moguće generisati jedinstven naziv snimka.");
     }
     /** Write ciphertext first; only publish metadata after final GCM auth tag is saved. */
     public synchronized JSONObject encryptRecording(File raw,String type,String lens,long createdAt,long duration,int width,int height)throws Exception {
         String id=nextId();
-        File destination=encryptedFile(id);
-        File temp=new File(payloadVault,"system_"+id+".incomplete");
-        // Each block has its own AndroidKeyStore-generated IV and authentication tag.
-        // Unlike a monolithic GCM stream, even large recordings use bounded memory.
-        try(DataOutputStream outer=new DataOutputStream(new BufferedOutputStream(new FileOutputStream(temp)));
+        if(!SharedVault.configured(context))throw new IOException("U Postavkama prvo odaberi vanjski folder za snimke.");
+        SharedVault selected=new SharedVault(context);
+        String finalName="system_"+id+".cjn";
+        android.net.Uri temporary=selected.create("system_"+id+".incomplete");
+        // Encrypt directly to the user-selected folder; no app-private encrypted duplicate.
+        try(DataOutputStream outer=new DataOutputStream(new BufferedOutputStream(selected.output(temporary)));
             InputStream in=new BufferedInputStream(new FileInputStream(raw))){
             outer.write(MAGIC_V2);
             final long originalSize=raw.length();
@@ -208,13 +248,13 @@ public final class RecorderStore {
                 blockNumber++;
             }
             outer.flush();
-        }catch(Exception e){temp.delete();throw e;}
+        }catch(Exception e){try{selected.remove(temporary);}catch(Exception ignored){}throw e;}
         String name=("audio".equals(type)?"VOICE_":("screen".equals(type)?"SCREEN_":"CAM_"))
             +new java.text.SimpleDateFormat("yyyy-MM-dd_HH-mm-ss",java.util.Locale.ROOT)
             .format(new java.util.Date(createdAt))+("audio".equals(type)?".m4a":".mp4");
         JSONObject record=new JSONObject();record.put("id",id);record.put("name",name);record.put("type",type);record.put("lens",lens);record.put("durationSec",duration);record.put("createdAt",createdAt);record.put("width",width);record.put("height",height);record.put("sizeBytes",raw.length());
         synchronized(INDEX_LOCK){
-            if(!temp.renameTo(destination)){temp.delete();throw new IllegalStateException("Nije moguće spremiti šifrirani zapis.");}
+            selected.publish(temporary,finalName);
             JSONArray arr=readIndex();JSONArray next=new JSONArray();next.put(record);
             for(int i=0;i<arr.length();i++)next.put(arr.get(i));
             writeIndex(next);
@@ -244,16 +284,15 @@ public final class RecorderStore {
     }
     private void decryptTo(String id,OutputStream out,TransferProgress progress)throws Exception {
         find(id);
-        File input=encryptedFile(id);
-        if(!input.exists())throw new IllegalArgumentException("Šifrirani snimak ne postoji.");
-        try(DataInputStream in=new DataInputStream(new BufferedInputStream(new FileInputStream(input)))){
+        Blob input=encryptedBlob(id);
+        try(DataInputStream in=new DataInputStream(new BufferedInputStream(input.input()))){
             byte[] magic=new byte[4];in.readFully(magic);
             if(java.util.Arrays.equals(magic,MAGIC_V2)){
                 // 4-byte MAGIC + 8-byte plaintext length, then authenticated
                 // chunks [length (4), IV (12), ciphertext + GCM tag (length+16)].
                 final long originalSize=in.readLong();
                 if(originalSize<1)throw new IOException("Neispravna izvorna dužina datoteke.");
-                long total=Math.max(1L,input.length()-12L);
+                long total=Math.max(1L,input.size-12L);
                 long processed=0,decoded=0,blockNumber=0;
                 report(progress,0,total);
                 SecretKey secret=key();
@@ -289,7 +328,7 @@ public final class RecorderStore {
                 byte[] iv=new byte[12];in.readFully(iv);
                 Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");
                 cipher.init(Cipher.DECRYPT_MODE,key(),new GCMParameterSpec(128,iv));
-                long total=Math.max(1L,input.length()-16L);
+                long total=Math.max(1L,input.size-16L);
                 long processed=0;
                 byte[] block=new byte[64*1024];
                 report(progress,0,total);
@@ -337,7 +376,7 @@ public final class RecorderStore {
                 if(out==null)throw new IllegalStateException("Nema izlaznog toka za izvoz.");
                 decryptTo(id,out,progress);
             }
-            if(progress!=null)progress.onProgress(Math.max(1L,encryptedFile(id).length()-16L),Math.max(1L,encryptedFile(id).length()-16L));
+            if(progress!=null)progress.onProgress(Math.max(1L,encryptedBlob(id).size-16L),Math.max(1L,encryptedBlob(id).size-16L));
             ContentValues ready=new ContentValues();ready.put(MediaStore.MediaColumns.IS_PENDING,0);
             int published=context.getContentResolver().update(uri,ready,null,null);
             if(published<1)throw new java.io.IOException("Galerija nije potvrdila objavu MP4 snimka.");
@@ -388,11 +427,15 @@ public final class RecorderStore {
         if(raw!=null)for(File f:raw)pendingBytes+=f.length();
         out.put("pendingCount",raw==null?0:raw.length);
         out.put("pendingBytes",pendingBytes);
-        out.put("encryptedCount",enc==null?0:enc.length);
+        int sharedCount=0;
+        if(SharedVault.configured(context))for(SharedVault.Item item:new SharedVault(context).list())if(item.name.endsWith(".cjn"))sharedCount++;
+        out.put("encryptedCount",(enc==null?0:enc.length)+sharedCount);
         out.put("incompleteCount",incomplete==null?0:incomplete.length);
         out.put("indexedCount",repairIndex().length());
         out.put("usableBytes",payloadVault.getUsableSpace());
-        out.put("storagePath",payloadVault.getAbsolutePath());
+        out.put("storagePath",SharedVault.configured(context)?"Korisnički odabrani folder: "+SharedVault.selectedUri(context):payloadVault.getAbsolutePath());
+        out.put("externalSelected",SharedVault.configured(context));
+        out.put("legacyAppFiles",enc==null?0:enc.length);
         return out;
     }
     /** Delete exactly one encrypted recording after its index entry is removed.
@@ -413,9 +456,12 @@ public final class RecorderStore {
             // Keep the encrypted file in place until metadata is durably saved.
             // If deletion fails, repairIndex will safely rediscover the file.
             writeIndex(next);
-            File stored=encryptedFile(id);
-            if(stored.exists()&&!stored.delete())
-                throw new IOException("Nije moguće obrisati šifrirani fajl. Pokušaj ponovo.");
+            encryptedBlob(id).remove();
+            // A failed migration may have left a duplicate at the legacy path.
+            File legacy=new File(payloadVault,"system_"+id+".cjn");
+            if(legacy.exists()&&!legacy.delete())throw new IOException("Ne mogu obrisati preostalu staru .cjn kopiju.");
+            File older=new File(vault,id+".svr");
+            if(older.exists()&&!older.delete())throw new IOException("Ne mogu obrisati preostalu .svr kopiju.");
             for(String ext:new String[]{".mp4",".m4a"}){
                 File cached=new File(previews,"view_"+id+ext);
                 if(cached.exists()&&!cached.delete())
@@ -423,13 +469,34 @@ public final class RecorderStore {
             }
         }
     }
+    /** Explicit migration after SAF folder selection; never delete source until SHA-256 verified. */
+    public JSONObject migrateShared()throws Exception {
+        if(!SharedVault.configured(context))throw new IOException("Prvo odaberi folder u Postavkama.");
+        synchronized(INDEX_LOCK){
+            migrateLegacy();
+            SharedVault target=new SharedVault(context);
+            File[] local=payloadVault.listFiles((dir,name)->name.startsWith("system_")&&name.endsWith(".cjn"));
+            int moved=0;long released=0;
+            if(local!=null)for(File file:local){
+                target.copyVerified(file,file.getName());
+                long length=file.length();
+                if(!file.delete())throw new IOException("Kopija je sigurna, ali stari fajl nije uklonjen: "+file.getName());
+                moved++;released+=length;
+            }
+            JSONObject summary=new JSONObject();summary.put("moved",moved);summary.put("releasedBytes",released);
+            return summary;
+        }
+    }
     public synchronized void deleteAll()throws Exception {
         JSONArray all=repairIndex();
         for(int i=0;i<all.length();i++){
             JSONObject r=all.getJSONObject(i);
-            File encrypted=encryptedFile(r.getString("id"));
-            if(encrypted.exists()&&!encrypted.delete())
-                throw new IOException("Nije moguće obrisati "+encrypted.getName()+". Ništa se ne skriva iz indeksa.");
+            String id=r.getString("id");
+            encryptedBlob(id).remove();
+            File legacy=new File(payloadVault,"system_"+id+".cjn");
+            if(legacy.exists()&&!legacy.delete())throw new IOException("Ne mogu obrisati staru kopiju: "+legacy.getName());
+            File older=new File(vault,id+".svr");
+            if(older.exists()&&!older.delete())throw new IOException("Ne mogu obrisati stari SVR: "+older.getName());
         }
         writeIndex(new JSONArray());purgePreviews();
     }

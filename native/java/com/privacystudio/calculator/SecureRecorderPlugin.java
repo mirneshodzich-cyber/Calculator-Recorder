@@ -117,7 +117,39 @@ public class SecureRecorderPlugin extends Plugin {
     }
     @PluginMethod public void touch(PluginCall call){RecorderService.userInteracted();call.resolve();}
 
+    private boolean needsStorageFolder(PluginCall call){
+        if(!SharedVault.configured(getContext())){
+            call.reject("U Postavkama odaberi folder u Documents za šifrirane snimke. Bez foldera snimanje neće početi.");
+            return true;
+        }
+        return false;
+    }
+    @PluginMethod public void storageInfo(PluginCall call){
+        metadata.execute(()->{try{call.resolve(JSObject.fromJSONObject(SharedVault.status(getContext())));}
+            catch(Exception e){call.reject("Ne mogu očitati folder: "+e.getMessage());}});
+    }
+    @PluginMethod public void chooseStorageFolder(PluginCall call){
+        if(RecorderService.busy()||runningTransfer.get()!=null){call.reject("Zaustavi snimanje i obradu prije odabira foldera.");return;}
+        Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        startActivityForResult(call,intent,"storageFolderChosen");
+    }
+    @ActivityCallback private void storageFolderChosen(PluginCall call,ActivityResult result){
+        if(result.getResultCode()!=Activity.RESULT_OK||result.getData()==null||result.getData().getData()==null){
+            call.reject("Odabir foldera je otkazan.");return;
+        }
+        try{
+            SharedVault.choose(getContext(),result.getData().getData(),result.getData().getFlags());
+            call.resolve(JSObject.fromJSONObject(SharedVault.status(getContext())));
+        }catch(Exception e){call.reject("Folder nije sačuvan: "+e.getMessage());}
+    }
+    @PluginMethod public void migrateStorage(PluginCall call){
+        if(RecorderService.busy()||runningTransfer.get()!=null){call.reject("Prvo zaustavi snimanje, izvoz i pregled.");return;}
+        background.execute(()->{try{call.resolve(JSObject.fromJSONObject(new RecorderStore(getContext()).migrateShared()));}
+            catch(Exception e){call.reject("Premještanje nije dovršeno: "+e.getMessage());}});
+    }
     @PluginMethod public void startCamera(PluginCall call){
+        if(needsStorageFolder(call))return;
         if(RecorderService.busy()){call.reject("Snimanje je već aktivno.");return;}
         if(getPermissionState("capture")!=PermissionState.GRANTED){requestPermissionForAlias("capture",call,"capturePermissionResult");return;}
         requestOptionalMicThenCamera(call);
@@ -152,6 +184,7 @@ public class SecureRecorderPlugin extends Plugin {
         catch(Exception e){call.reject("Ne mogu pokrenuti kameru: "+e.getMessage());}
     }
     @PluginMethod public void startAudio(PluginCall call){
+        if(needsStorageFolder(call))return;
         if(RecorderService.busy()){call.reject("Snimanje je već aktivno.");return;}
         if(getPermissionState("audio")!=PermissionState.GRANTED){
             requestPermissionForAlias("audio",call,"audioOnlyPermissionResult");return;
@@ -187,6 +220,7 @@ public class SecureRecorderPlugin extends Plugin {
         }catch(Exception e){call.reject("Naziv obavijesti nije spremljen: "+e.getMessage());}
     }
     @PluginMethod public void startScreen(PluginCall call){
+        if(needsStorageFolder(call))return;
         if(RecorderService.busy()){call.reject("Snimanje je već aktivno.");return;}
         if(Build.VERSION.SDK_INT>=33&&getPermissionState("notifications")!=PermissionState.GRANTED){requestPermissionForAlias("notifications",call,"notificationScreenResult");return;}
         requestProjection(call);
