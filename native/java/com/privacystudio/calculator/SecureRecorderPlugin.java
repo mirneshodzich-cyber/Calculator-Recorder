@@ -102,13 +102,11 @@ public class SecureRecorderPlugin extends Plugin {
         }catch(org.json.JSONException e){call.reject("Ne mogu očitati napredak: "+e.getMessage());}
     }
     @PluginMethod public void cancelTransfer(PluginCall call){
-        try {
-            TransferJob job=runningTransfer.get();
-            JSObject out=new JSObject();
-            if(job==null){out.put("cancelRequested",false);out.put("active",false);}
-            else {job.requestCancel();out.put("cancelRequested",true);out.put("active",true);}
-            call.resolve(out);
-        }catch(org.json.JSONException e){call.reject("Ne mogu zatražiti prekid: "+e.getMessage());}
+        TransferJob job=runningTransfer.get();
+        JSObject out=new JSObject();
+        if(job==null){out.put("cancelRequested",false);out.put("active",false);}
+        else {job.requestCancel();out.put("cancelRequested",true);out.put("active",true);}
+        call.resolve(out);
     }
     @PluginMethod public void status(PluginCall call) {
         try {
