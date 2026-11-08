@@ -45,7 +45,7 @@ function renderRecord(){
  $('recordTimer').textContent=tformat(s);$('recordPanel').classList.toggle('is-recording',state.active);
  $('recordState').textContent=state.saving?'ŠIFRIRANJE SNIMKA':state.preparing?'PRIPREMA KAMERE / EKRANA':state.active?'SNIMANJE U TOKU':'SPREMNO ZA SNIMANJE';
  $('recordTitle').textContent=state.saving?'Spremanje u sef...':state.preparing?'Priprema snimanja...':state.active?'Snimanje aktivno':'Pokreni snimanje';
- if(state.active)$('recordDescription').textContent='Snimanje traje uz obavijest 正在录制视频. Automatski prestaje poslije 20 minuta neaktivnosti.';
+ if(state.active)$('recordDescription').textContent='Snimanje traje uz obavijest 正在录制视频. Automatski prestaje 90 minuta nakon izlaska iz aplikacije.';
  $('recordButton').classList.toggle('stop',state.active);
  $('recordButton').innerHTML=state.saving?'Pričekaj, snimak se šifrira...':state.preparing?'Priprema snimanja...':state.active?'■ &nbsp; Zaustavi snimanje':'● &nbsp; Započni snimanje';
  $('recordButton').disabled=state.saving||state.preparing;
