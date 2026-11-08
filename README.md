@@ -224,3 +224,21 @@ Workflow koristi Capacitor 8.6.0 i JDK 21. `android/` scaffold se generira tokom
 - `native/java/.../RecorderService.java` — Camera2 / MediaProjection snimanje i watchdog
 - `native/java/.../RecorderStore.java` — AES-GCM sef, pregled i izvoz
 - `scripts/install-native.mjs` — kopira native kod u generirani Android projekt
+
+
+## v12: korisnički odabrana pohrana (SAF)
+
+- U aplikaciji idi na **Postavke → Vanjska pohrana → Odaberi folder na telefonu**.
+- U Android sistemskom odabiru otvori npr. **Documents**, napravi vlastiti folder **Moji šifrirani zapisi** i odaberi ga. Na Android 11+ ne može se izabrati root memorije ili root Downloads folder.
+- Ovo je neovisni folder izvan `Android/data`, `getExternalFilesDir()` i APK-a. Za rad sa njim koristi se `ACTION_OPEN_DOCUMENT_TREE` + trajna URI dozvola. Nisu potrebne opšte dozvole za pristup svim fajlovima.
+- **Prije prvog novog snimanja moraš izabrati folder.** Bez foldera UI vraća grešku i ne pokreće kameru/mikrofon.
+- Za ranije šifrirane `.cjn` fajlove pritisni **Premjesti stare šifrirane snimke**. Stara datoteka ostaje dok nova nije uspješno provjerena SHA-256 poređenjem; tek tada se uklanja iz app-specific memorije. Nikada ne deinstaliraj staru aplikaciju prije potvrde migracije.
+- Svi novi šifrirani zapisi se pišu direktno u odabrani folder. Tokom snimanja originalni MP4/M4A privremeno postoji u privatnoj memoriji, pa zauzeće **User data** privremeno raste. Nakon ispravnog završetka/šifriranja, privremeni fajl se uklanja; tokom pregleda privremena dešifrirana kopija može kratkotrajno zauzimati cache.
+- Sam `.cjn` fajl može preživjeti deinstalaciju, ali ključ iz **Android Keystore** obično ne. Bez odgovarajućeg ključa šifrirani fajl neće biti moguće dešifrirati nakon deinstalacije ili brisanja podataka.
+- Postojeći sef, AES-256-GCM (SVR1 i SVR2), diktafon, snimanje videa/ekrana, eksport i brisanje ostaju. Ne mijenjaj aktivni folder dok on sadrži šifrirane datoteke.
+- Pohrana preko SAF može biti i na SD kartici / podržanom provideru. Izaberi **lokalni folder na telefonu** za rad s velikim videozapisima. Daljinski/cloud provideri mogu biti spori ili zahtijevati mrežu.
+- Android foreground obavijesti i sistemski indikatori aktivnog snimanja ostaju vidljivi.
+
+### Poznato ograničenje
+
+Nije proveden stvarni Android build / test snimanja na telefonu u ovom okruženju. Pohrana preko SAF zavisi od kompatibilnosti Android `DocumentsProvider` implementacije. Testiraj prvo novi kratki zapis, pogledaj ga u sefu, izvezi i obriši, pa tek onda migiraj veće postojeće arhive.
