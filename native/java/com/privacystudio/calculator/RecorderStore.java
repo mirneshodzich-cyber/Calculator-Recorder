@@ -26,6 +26,8 @@ import java.io.OutputStream;
 import java.io.DataInputStream;
 import java.security.KeyStore;
 import java.util.UUID;
+import java.security.SecureRandom;
+import java.util.Locale;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -48,14 +50,20 @@ public final class RecorderStore {
     private static final int CHUNK_BYTES = 256 * 1024;
     private final Context context;
     private final File vault;
+    private final File payloadVault;
     private final File previews;
     private final File index;
     public RecorderStore(Context c) {
         context=c.getApplicationContext();
         vault=new File(context.getFilesDir(),"encrypted_vault");
+        // Separate encrypted files on app-specific external storage, never inside the APK.
+        // This directory is removed on app uninstall; Android Keystore keys are too.
+        File external=context.getExternalFilesDir(null);
+        if(external==null)throw new IllegalStateException("Vanjska privatna memorija nije dostupna; sef se neće premjestiti nesigurno.");
+        payloadVault=new File(external,"SecureArchive");
         previews=new File(context.getCacheDir(),"private_preview");
         index=new File(vault,"records.json");
-        vault.mkdirs();previews.mkdirs();
+        vault.mkdirs();payloadVault.mkdirs();previews.mkdirs();
     }
     private SecretKey key() throws Exception {
         KeyStore ks=KeyStore.getInstance("AndroidKeyStore");ks.load(null);
@@ -98,17 +106,43 @@ public final class RecorderStore {
             tmp.delete();
         }
     }
-    /** Safely expose encrypted .svr files even if a previous index write was interrupted. */
+    /** Copy existing .svr encrypted blobs to external .cjn without changing AES bytes.
+     *  The old file is retained until copy+fsync+length verification succeeds.
+     *  IDs are stable so existing records and Android Keystore keys remain valid.
+     */
+    private void migrateLegacy() throws Exception {
+        File[] old=vault.listFiles((dir,name)->name.endsWith(".svr"));
+        if(old==null)return;
+        for(File file:old){
+            String id=file.getName().substring(0,file.getName().length()-4);
+            if(!id.matches("[A-Za-z0-9_-]{1,96}"))continue;
+            File dest=new File(payloadVault,"system_"+id+".cjn");
+            if(!dest.exists()){
+                File temp=new File(payloadVault,"system_"+id+".migrating");
+                try(InputStream in=new FileInputStream(file);FileOutputStream out=new FileOutputStream(temp)){
+                    copy(in,out);out.getFD().sync();
+                }catch(Exception e){temp.delete();throw e;}
+                if(temp.length()!=file.length()||!temp.renameTo(dest)){
+                    temp.delete();throw new IOException("Migracija šifriranog fajla nije uspjela.");
+                }
+            }
+            if(dest.length()!=file.length())throw new IOException("Neispravna dužina kopiranog sefa.");
+            // If delete fails the duplicate is harmless; the external file is authoritative.
+            if(!file.delete())android.util.Log.w("RecorderStore","Legacy encrypted copy retained: "+file.getName());
+        }
+    }
+    /** Rebuild metadata when an index write was interrupted. Never rewrite AES content. */
     private JSONArray repairIndex()throws Exception {
         synchronized(INDEX_LOCK){
+            migrateLegacy();
             JSONArray found=readIndex();
             Set<String> ids=new HashSet<>();
             for(int i=0;i<found.length();i++) ids.add(found.getJSONObject(i).optString("id"));
-            File[] encrypted=vault.listFiles((dir,name)->name.endsWith(".svr"));
+            File[] encrypted=payloadVault.listFiles((dir,name)->name.startsWith("system_")&&name.endsWith(".cjn"));
             boolean changed=false;
             if(encrypted!=null) for(File file:encrypted){
-                String id=file.getName().substring(0,file.getName().length()-4);
-                if(ids.contains(id)) continue;
+                String id=file.getName().substring(7,file.getName().length()-4);
+                if(!id.matches("[A-Za-z0-9_-]{1,96}")||ids.contains(id))continue;
                 JSONObject record=new JSONObject();
                 record.put("id",id);record.put("name","RECOVERED_"+file.lastModified()+".mp4");
                 record.put("type","recovered");record.put("lens","unknown");
@@ -130,12 +164,26 @@ public final class RecorderStore {
         }
         throw new IllegalArgumentException("Nepoznat snimak.");
     }
-    private File encryptedFile(String id){return new File(vault,id+".svr");}
+    private File encryptedFile(String id){
+        if(id==null||!id.matches("[A-Za-z0-9_-]{1,96}"))throw new IllegalArgumentException("Neispravan ID snimka.");
+        File modern=new File(payloadVault,"system_"+id+".cjn");
+        if(modern.exists())return modern;
+        File old=new File(vault,id+".svr");
+        return old.exists()?old:modern;
+    }
+    private static final SecureRandom RANDOM=new SecureRandom();
+    private String nextId(){
+        for(int i=0;i<20;i++){
+            String id=Long.toString(10000000000L+Math.floorMod(RANDOM.nextLong(),89999999999L));
+            if(!new File(payloadVault,"system_"+id+".cjn").exists())return id;
+        }
+        throw new IllegalStateException("Nije moguće generisati jedinstven naziv snimka.");
+    }
     /** Write ciphertext first; only publish metadata after final GCM auth tag is saved. */
     public synchronized JSONObject encryptRecording(File raw,String type,String lens,long createdAt,long duration,int width,int height)throws Exception {
-        String id=UUID.randomUUID().toString();
+        String id=nextId();
         File destination=encryptedFile(id);
-        File temp=new File(vault,id+".incomplete");
+        File temp=new File(payloadVault,"system_"+id+".incomplete");
         // Each block has its own AndroidKeyStore-generated IV and authentication tag.
         // Unlike a monolithic GCM stream, even large recordings use bounded memory.
         try(DataOutputStream outer=new DataOutputStream(new BufferedOutputStream(new FileOutputStream(temp)));
@@ -161,7 +209,9 @@ public final class RecorderStore {
             }
             outer.flush();
         }catch(Exception e){temp.delete();throw e;}
-        String name=("screen".equals(type)?"SCREEN_":"CAM_")+new java.text.SimpleDateFormat("yyyy-MM-dd_HH-mm-ss",java.util.Locale.ROOT).format(new java.util.Date(createdAt))+".mp4";
+        String name=("audio".equals(type)?"VOICE_":("screen".equals(type)?"SCREEN_":"CAM_"))
+            +new java.text.SimpleDateFormat("yyyy-MM-dd_HH-mm-ss",java.util.Locale.ROOT)
+            .format(new java.util.Date(createdAt))+("audio".equals(type)?".m4a":".mp4");
         JSONObject record=new JSONObject();record.put("id",id);record.put("name",name);record.put("type",type);record.put("lens",lens);record.put("durationSec",duration);record.put("createdAt",createdAt);record.put("width",width);record.put("height",height);record.put("sizeBytes",raw.length());
         synchronized(INDEX_LOCK){
             if(!temp.renameTo(destination)){temp.delete();throw new IllegalStateException("Nije moguće spremiti šifrirani zapis.");}
@@ -262,7 +312,8 @@ public final class RecorderStore {
     public synchronized File preview(String id)throws Exception {return preview(id,null);}
     public synchronized File preview(String id,TransferProgress progress)throws Exception {
         purgePreviews();
-        File file=new File(previews,"view_"+id+".mp4");
+        boolean audio="audio".equals(find(id).optString("type"));
+        File file=new File(previews,"view_"+id+(audio?".m4a":".mp4"));
         try(OutputStream out=new BufferedOutputStream(new FileOutputStream(file))){decryptTo(id,out,progress);}
         catch(Exception e){file.delete();throw e;}
         if(file.length()<1024L){file.delete();throw new java.io.IOException("Dešifrirani video je prazan.");}
@@ -274,11 +325,12 @@ public final class RecorderStore {
     public synchronized String export(String id,TransferProgress progress)throws Exception {
         JSONObject r=find(id);String name=r.getString("name");
         if(Build.VERSION.SDK_INT<29)throw new UnsupportedOperationException("Izvoz preko MediaStore zahtijeva Android 10+.");
+        boolean audio="audio".equals(r.optString("type"));
         ContentValues meta=new ContentValues();meta.put(MediaStore.MediaColumns.DISPLAY_NAME,name);
-        meta.put(MediaStore.MediaColumns.MIME_TYPE,"video/mp4");
-        meta.put(MediaStore.MediaColumns.RELATIVE_PATH,"Movies/Calculator Exports/");
+        meta.put(MediaStore.MediaColumns.MIME_TYPE,audio?"audio/mp4":"video/mp4");
+        meta.put(MediaStore.MediaColumns.RELATIVE_PATH,audio?"Music/Calculator Exports/":"Movies/Calculator Exports/");
         meta.put(MediaStore.MediaColumns.IS_PENDING,1);
-        Uri uri=context.getContentResolver().insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI,meta);
+        Uri uri=context.getContentResolver().insert(audio?MediaStore.Audio.Media.EXTERNAL_CONTENT_URI:MediaStore.Video.Media.EXTERNAL_CONTENT_URI,meta);
         if(uri==null)throw new IllegalStateException("Nije moguće kreirati datoteku u galeriji.");
         try{
             try(OutputStream out=context.getContentResolver().openOutputStream(uri,"w")){
@@ -304,7 +356,8 @@ public final class RecorderStore {
             try{
                 reader.setDataSource(file.getAbsolutePath());
                 String video=reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO);
-                if(!"yes".equalsIgnoreCase(video)){invalid++;continue;}
+                String audio=reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO);
+                if(!"yes".equalsIgnoreCase(video)&&!"yes".equalsIgnoreCase(audio)){invalid++;continue;}
                 String duration=reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
                 String width=reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH);
                 String height=reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT);
@@ -315,7 +368,7 @@ public final class RecorderStore {
                 try {createdAt=Long.parseLong(file.getName().replace("capture_", "").replace(".tmp", ""));}
                 catch(NumberFormatException ignored){}
                 // Metadata isn't available for older orphan files; mark origin unknown.
-                encryptRecording(file,"recovered","unknown",createdAt,Math.max(1,ms/1000),w,h);
+                encryptRecording(file,"yes".equalsIgnoreCase(video)?"recovered":"audio","unknown",createdAt,Math.max(1,ms/1000),w,h);
                 if(!file.delete())android.util.Log.w("RecorderStore","Could not delete recovered raw video");
                 recovered++;
             }catch(Exception e){
@@ -329,8 +382,8 @@ public final class RecorderStore {
         JSONObject out=new JSONObject();
         File pending=new File(context.getFilesDir(),"capture_pending");
         File[] raw=pending.listFiles((d,n)->n.startsWith("capture_")&&n.endsWith(".tmp"));
-        File[] enc=vault.listFiles((d,n)->n.endsWith(".svr"));
-        File[] incomplete=vault.listFiles((d,n)->n.endsWith(".incomplete"));
+        File[] enc=payloadVault.listFiles((d,n)->n.endsWith(".cjn"));
+        File[] incomplete=payloadVault.listFiles((d,n)->n.endsWith(".incomplete")||n.endsWith(".migrating"));
         long pendingBytes=0;
         if(raw!=null)for(File f:raw)pendingBytes+=f.length();
         out.put("pendingCount",raw==null?0:raw.length);
@@ -338,7 +391,8 @@ public final class RecorderStore {
         out.put("encryptedCount",enc==null?0:enc.length);
         out.put("incompleteCount",incomplete==null?0:incomplete.length);
         out.put("indexedCount",repairIndex().length());
-        out.put("usableBytes",context.getFilesDir().getUsableSpace());
+        out.put("usableBytes",payloadVault.getUsableSpace());
+        out.put("storagePath",payloadVault.getAbsolutePath());
         return out;
     }
     /** Delete exactly one encrypted recording after its index entry is removed.
@@ -362,15 +416,20 @@ public final class RecorderStore {
             File stored=encryptedFile(id);
             if(stored.exists()&&!stored.delete())
                 throw new IOException("Nije moguće obrisati šifrirani fajl. Pokušaj ponovo.");
-            File cached=new File(previews,"view_"+id+".mp4");
-            if(cached.exists()&&!cached.delete())
-                android.util.Log.w("RecorderStore","Could not remove expired preview for deleted record");
+            for(String ext:new String[]{".mp4",".m4a"}){
+                File cached=new File(previews,"view_"+id+ext);
+                if(cached.exists()&&!cached.delete())
+                    android.util.Log.w("RecorderStore","Could not remove expired preview for deleted record");
+            }
         }
     }
     public synchronized void deleteAll()throws Exception {
-        JSONArray all=readIndex();
+        JSONArray all=repairIndex();
         for(int i=0;i<all.length();i++){
-            JSONObject r=all.getJSONObject(i);encryptedFile(r.getString("id")).delete();
+            JSONObject r=all.getJSONObject(i);
+            File encrypted=encryptedFile(r.getString("id"));
+            if(encrypted.exists()&&!encrypted.delete())
+                throw new IOException("Nije moguće obrisati "+encrypted.getName()+". Ništa se ne skriva iz indeksa.");
         }
         writeIndex(new JSONArray());purgePreviews();
     }

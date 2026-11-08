@@ -48,6 +48,9 @@ import java.util.concurrent.Executors;
 public class RecorderService extends Service {
     public static final String CAMERA="com.privacystudio.calculator.START_CAMERA";
     public static final String SCREEN="com.privacystudio.calculator.START_SCREEN";
+    public static final String AUDIO="com.privacystudio.calculator.START_AUDIO";
+    public static final String NOTICE_PREFERENCES="recorder_notification_v11";
+    public static final String NOTICE_LABEL="custom_label";
     public static final String STOP="com.privacystudio.calculator.STOP";
     private static final String CHANNEL="camera_capture_active";
     private static final String TAG="VideoRecorder";
@@ -150,52 +153,94 @@ public class RecorderService extends Service {
         if(intent==null)return START_NOT_STICKY;
         String action=intent.getAction();
         if(STOP.equals(action)){finish();return START_NOT_STICKY;}
-        if(!CAMERA.equals(action)&&!SCREEN.equals(action))return START_NOT_STICKY;
+        if(!CAMERA.equals(action)&&!SCREEN.equals(action)&&!AUDIO.equals(action))return START_NOT_STICKY;
         if(active||preparing||finishing)return START_NOT_STICKY;
         getSharedPreferences(PREFS,MODE_PRIVATE).edit().putString("lastError","").apply();
         recorderHadError=false;
         preparing=true;preparingSince=SystemClock.elapsedRealtime();
-        currentMode=CAMERA.equals(action)?"camera":"screen";
+        currentMode=CAMERA.equals(action)?"camera":SCREEN.equals(action)?"screen":"audio";
         startedAt=System.currentTimeMillis();
         appInForeground=MainActivity.isShowing()||PreviewActivity.isShowing();
         backgroundSince=appInForeground?0:SystemClock.elapsedRealtime();
         lens=intent.getStringExtra("lens")==null?"back":intent.getStringExtra("lens");
         generation++;
         try{
-            startVisibleNotification(SCREEN.equals(action));
+            startVisibleNotification(currentMode);
             if(getFilesDir().getUsableSpace()<64L*1024L*1024L)throw new IllegalStateException("Premalo slobodne interne memorije (manje od 64 MB)");
             File pending=new File(getFilesDir(),"capture_pending");pending.mkdirs();
             rawFile=new File(pending,"capture_"+startedAt+".tmp");
             handler.removeCallbacks(watchdog);handler.postDelayed(watchdog,5000);
             if(CAMERA.equals(action))beginCamera(generation);
-            else beginScreen(intent);
+            else if(SCREEN.equals(action))beginScreen(intent);
+            else beginAudio();
         }catch(Exception e){setError("Pokretanje snimanja nije uspjelo",e);finish();}
         return START_NOT_STICKY;
     }
     private void makeChannel(){
         if(Build.VERSION.SDK_INT>=26){
-            NotificationChannel channel=new NotificationChannel(CHANNEL,"正在录制视频",NotificationManager.IMPORTANCE_LOW);
-            channel.setDescription("正在录制视频");channel.setShowBadge(false);
+            NotificationChannel channel=new NotificationChannel(CHANNEL,"Aktivno snimanje",NotificationManager.IMPORTANCE_LOW);
+            channel.setDescription("Vidljivi status snimanja videa, ekrana ili zvuka");channel.setShowBadge(false);
             ((NotificationManager)getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(channel);
         }
     }
-    private void startVisibleNotification(boolean screen){
+    private void startVisibleNotification(String mode){
         Intent launch=new Intent(this,MainActivity.class);
         launch.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP|Intent.FLAG_ACTIVITY_CLEAR_TOP);
         PendingIntent pending=PendingIntent.getActivity(this,0,launch,PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE);
+        String preferred=getSharedPreferences(NOTICE_PREFERENCES,MODE_PRIVATE).getString(NOTICE_LABEL,"Calculator");
+        if(preferred==null||preferred.trim().isEmpty())preferred="Calculator";
+        if(preferred.length()>36)preferred=preferred.substring(0,36);
+        String status="audio".equals(mode)?"正在录音":"screen".equals(mode)?"正在录制屏幕":"正在录制视频";
+        // Customizable app label, but never remove the truthful recording status.
         Notification.Builder builder=Build.VERSION.SDK_INT>=26?new Notification.Builder(this,CHANNEL):new Notification.Builder(this);
-        Notification notification=builder.setSmallIcon(android.R.drawable.ic_menu_camera)
-                .setContentTitle("正在录制视频")
-                .setContentText(screen?"正在录制屏幕":"正在录制视频")
+        Notification notification=builder.setSmallIcon(R.drawable.ic_recording_status)
+                .setContentTitle(preferred+" · "+status)
+                .setContentText(status)
                 .setContentIntent(pending).setOngoing(true).setOnlyAlertOnce(true).setShowWhen(false).build();
         if(Build.VERSION.SDK_INT>=29){
-            int type=screen?ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION:
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA;
-            if(!screen && checkSelfPermission(Manifest.permission.RECORD_AUDIO)==PackageManager.PERMISSION_GRANTED)
+            int type="screen".equals(mode)?ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION:
+                    "audio".equals(mode)?ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE:ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA;
+            if("camera".equals(mode)&&checkSelfPermission(Manifest.permission.RECORD_AUDIO)==PackageManager.PERMISSION_GRANTED)
                 type|=ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
             startForeground(NOTIFY_ID,notification,type);
         } else startForeground(NOTIFY_ID,notification);
         foregoundShown=true;
+    }
+    public static String getNoticeLabel(Context c){
+        return c.getSharedPreferences(NOTICE_PREFERENCES,MODE_PRIVATE).getString(NOTICE_LABEL,"Calculator");
+    }
+    public static String saveNoticeLabel(Context c,String proposed){
+        String label=proposed==null?"":proposed.trim();
+        if(label.isEmpty()||label.length()>36||label.matches(".*[\\n\\r].*"))
+            throw new IllegalArgumentException("Naziv mora imati 1–36 znakova i ne smije sadržavati novi red.");
+        c.getSharedPreferences(NOTICE_PREFERENCES,MODE_PRIVATE).edit().putString(NOTICE_LABEL,label).apply();
+        RecorderService running=instance;
+        if(running!=null&&running.foregoundShown){
+            running.handler.post(()->{
+                try{if(running.foregoundShown)running.startVisibleNotification(currentMode);}
+                catch(Exception e){Log.w(TAG,"Notification title update failed",e);}
+            });
+        }
+        return label;
+    }
+    private void beginAudio() throws Exception {
+        if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED)
+            throw new SecurityException("Potrebna je dozvola za mikrofon.");
+        // AAC-LC at 256 kbps / 48kHz. Save original .m4a bytes; never transcode.
+        MediaRecorder rec=Build.VERSION.SDK_INT>=31?new MediaRecorder(this):new MediaRecorder();
+        rec.setAudioSource(MediaRecorder.AudioSource.MIC);
+        rec.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+        rec.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
+        rec.setAudioEncodingBitRate(256000);
+        rec.setAudioSamplingRate(48000);
+        rec.setOutputFile(rawFile.getAbsolutePath());
+        rec.setOnErrorListener((mr,what,extra)->{
+            recorderHadError=true;
+            setError("Diktafon je prijavio grešku ("+what+"/"+extra+")",null);
+            handler.post(this::finish);
+        });
+        rec.prepare();recorder=rec;rec.start();
+        active=true;preparing=false;startedAt=System.currentTimeMillis();
     }
     private MediaRecorder recorder(String source,int width,int height,int bitrate,int orientation,boolean withMic)throws Exception{
         MediaRecorder rec=Build.VERSION.SDK_INT>=31?new MediaRecorder(this):new MediaRecorder();
@@ -349,7 +394,7 @@ public class RecorderService extends Service {
                 // on the main looper: it previously froze Stop and other buttons.
                 if(sessionRecorder!=null){
                     try{if(wasRecording)sessionRecorder.stop();}
-                    catch(RuntimeException e){valid=false;setError("MP4 nije moguće završiti; snimaj barem 5 sekundi",e);}
+                    catch(RuntimeException e){valid=false;setError("Snimak nije moguće završiti; snimaj barem 5 sekundi",e);}
                     try{sessionRecorder.reset();sessionRecorder.release();}catch(Exception ignored){}
                 }
                 // Close camera/projection resources after finalization.
@@ -369,15 +414,18 @@ public class RecorderService extends Service {
                         MediaMetadataRetriever probe=new MediaMetadataRetriever();
                         try{
                             probe.setDataSource(pending.getAbsolutePath());
-                            if(!"yes".equalsIgnoreCase(probe.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)))
+                            if("audio".equals(type)){
+                                if(!"yes".equalsIgnoreCase(probe.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)))
+                                    throw new IllegalStateException("M4A nema čitljiv audio zapis");
+                            }else if(!"yes".equalsIgnoreCase(probe.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)))
                                 throw new IllegalStateException("MP4 nema čitljiv video zapis");
                         }finally{probe.release();}
                         JSONObject record=new RecorderStore(this).encryptRecording(pending,type,usedLens,when,sec,w,h);
                         saveSuccess(record);
                         if(!pending.delete())Log.w(TAG,"Saved MP4 but raw copy could not be deleted");
-                    }catch(Exception e){setError("Video nije spremljen u sef; privremeni MP4 je sačuvan",e);}
+                    }catch(Exception e){setError("Snimak nije spremljen u sef; izvorna datoteka je sačuvana",e);}
                 }else if(getSharedPreferences(PREFS,MODE_PRIVATE).getString("lastError","").isEmpty()){
-                    setError("Snimanje nije proizvelo ispravan MP4; privremeni fajl je sačuvan",null);
+                    setError("Snimanje nije proizvelo ispravan zapis; privremeni fajl je sačuvan",null);
                 }
             }finally{
                 handler.post(()->{stopForegroundSafe();finishing=false;stopSelf();});

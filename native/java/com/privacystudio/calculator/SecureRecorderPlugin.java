@@ -151,6 +151,41 @@ public class SecureRecorderPlugin extends Plugin {
         try{if(Build.VERSION.SDK_INT>=26)getContext().startForegroundService(i);else getContext().startService(i);call.resolve();}
         catch(Exception e){call.reject("Ne mogu pokrenuti kameru: "+e.getMessage());}
     }
+    @PluginMethod public void startAudio(PluginCall call){
+        if(RecorderService.busy()){call.reject("Snimanje je već aktivno.");return;}
+        if(getPermissionState("audio")!=PermissionState.GRANTED){
+            requestPermissionForAlias("audio",call,"audioOnlyPermissionResult");return;
+        }
+        requestNotificationThenAudio(call);
+    }
+    @PermissionCallback private void audioOnlyPermissionResult(PluginCall call){
+        if(getPermissionState("audio")!=PermissionState.GRANTED){call.reject("Diktafon treba dozvolu za mikrofon.");return;}
+        requestNotificationThenAudio(call);
+    }
+    private void requestNotificationThenAudio(PluginCall call){
+        if(Build.VERSION.SDK_INT>=33&&getPermissionState("notifications")!=PermissionState.GRANTED){
+            requestPermissionForAlias("notifications",call,"audioNotificationResult");return;
+        }
+        launchAudio(call);
+    }
+    @PermissionCallback private void audioNotificationResult(PluginCall call){
+        if(getPermissionState("notifications")!=PermissionState.GRANTED){call.reject("Dopusti obavijest o aktivnom snimanju.");return;}
+        launchAudio(call);
+    }
+    private void launchAudio(PluginCall call){
+        Intent i=new Intent(getContext(),RecorderService.class).setAction(RecorderService.AUDIO);
+        try{if(Build.VERSION.SDK_INT>=26)getContext().startForegroundService(i);else getContext().startService(i);call.resolve();}
+        catch(Exception e){call.reject("Diktafon nije pokrenut: "+e.getMessage());}
+    }
+    @PluginMethod public void getNoticeLabel(PluginCall call){
+        JSObject out=new JSObject();out.put("label",RecorderService.getNoticeLabel(getContext()));call.resolve(out);
+    }
+    @PluginMethod public void setNoticeLabel(PluginCall call){
+        try{
+            String label=RecorderService.saveNoticeLabel(getContext(),call.getString("label",""));
+            JSObject out=new JSObject();out.put("label",label);call.resolve(out);
+        }catch(Exception e){call.reject("Naziv obavijesti nije spremljen: "+e.getMessage());}
+    }
     @PluginMethod public void startScreen(PluginCall call){
         if(RecorderService.busy()){call.reject("Snimanje je već aktivno.");return;}
         if(Build.VERSION.SDK_INT>=33&&getPermissionState("notifications")!=PermissionState.GRANTED){requestPermissionForAlias("notifications",call,"notificationScreenResult");return;}
@@ -210,6 +245,7 @@ public class SecureRecorderPlugin extends Plugin {
                         job.checkCancelled();
                         Intent view=new Intent(host,PreviewActivity.class);
                         view.putExtra("previewPath",ready.getAbsolutePath());
+                        view.putExtra("recordType",new RecorderStore(getContext()).find(id).optString("type","camera"));
                         host.startActivity(view);
                         call.resolve();
                     }catch(Exception e){ready.delete();call.reject("Pregled nije uspio: "+e.getMessage());}
