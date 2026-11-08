@@ -110,6 +110,27 @@ public class SecureRecorderPlugin extends Plugin {
             JSObject out=new JSObject();out.put("path","file://"+file.getAbsolutePath());call.resolve(out);
         }catch(Exception e){call.reject("Ne mogu dešifrirati snimak: "+e.getMessage());}});
     }
+    /** Native player avoids WebView file:// and localhost URI restrictions on newer Android. */
+    @PluginMethod public void play(PluginCall call){
+        String id=call.getString("id");if(id==null){call.reject("Nedostaje ID snimka.");return;}
+        background.execute(()->{
+            try{
+                File f=new RecorderStore(getContext()).preview(id);
+                Activity host=getActivity();
+                if(host==null||host.isFinishing()){
+                    f.delete();call.reject("Aplikacija mora biti otvorena za reprodukciju.");return;
+                }
+                host.runOnUiThread(()->{
+                    try{
+                        Intent view=new Intent(host,PreviewActivity.class);
+                        view.putExtra("previewPath",f.getAbsolutePath());
+                        host.startActivity(view);
+                        call.resolve();
+                    }catch(Exception e){f.delete();call.reject("Ne mogu otvoriti video-player: "+e.getMessage());}
+                });
+            }catch(Exception e){call.reject("Privatni pregled nije uspio: "+e.getMessage());}
+        });
+    }
     @PluginMethod public void purgePreview(PluginCall call){background.execute(()->{new RecorderStore(getContext()).purgePreviews();call.resolve();});}
     @PluginMethod public void export(PluginCall call){
         String id=call.getString("id");if(id==null){call.reject("Nedostaje ID.");return;}

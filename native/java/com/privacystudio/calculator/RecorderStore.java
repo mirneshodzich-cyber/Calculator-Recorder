@@ -167,6 +167,7 @@ public final class RecorderStore {
         File file=new File(previews,"view_"+id+".mp4");
         try(OutputStream out=new BufferedOutputStream(new FileOutputStream(file))){decryptTo(id,out);}
         catch(Exception e){file.delete();throw e;}
+        if(file.length()<1024L){file.delete();throw new java.io.IOException("Dešifrirani video je prazan.");}
         return file;
     }
     public synchronized void purgePreviews(){File[] files=previews.listFiles();if(files!=null)for(File f:files)f.delete();}
@@ -176,7 +177,7 @@ public final class RecorderStore {
         if(Build.VERSION.SDK_INT<29)throw new UnsupportedOperationException("Izvoz preko MediaStore zahtijeva Android 10+.");
         ContentValues meta=new ContentValues();meta.put(MediaStore.MediaColumns.DISPLAY_NAME,name);
         meta.put(MediaStore.MediaColumns.MIME_TYPE,"video/mp4");
-        meta.put(MediaStore.MediaColumns.RELATIVE_PATH,"Movies/Private Video Exports/");
+        meta.put(MediaStore.MediaColumns.RELATIVE_PATH,"Movies/Calculator Exports/");
         meta.put(MediaStore.MediaColumns.IS_PENDING,1);
         Uri uri=context.getContentResolver().insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI,meta);
         if(uri==null)throw new IllegalStateException("Nije moguće kreirati datoteku u galeriji.");
@@ -186,7 +187,8 @@ public final class RecorderStore {
                 decryptTo(id,out);
             }
             ContentValues ready=new ContentValues();ready.put(MediaStore.MediaColumns.IS_PENDING,0);
-            context.getContentResolver().update(uri,ready,null,null);
+            int published=context.getContentResolver().update(uri,ready,null,null);
+            if(published<1)throw new java.io.IOException("Galerija nije potvrdila objavu MP4 snimka.");
             return name;
         }catch(Exception e){context.getContentResolver().delete(uri,null,null);throw e;}
     }
