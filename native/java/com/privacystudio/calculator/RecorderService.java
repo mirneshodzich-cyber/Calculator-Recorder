@@ -44,7 +44,7 @@ import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** User-initiated foreground recorder. Stops 20 minutes after the last UI interaction. */
+/** User-initiated foreground recorder. Stops after 90 minutes outside the app. */
 public class RecorderService extends Service {
     public static final String CAMERA="com.privacystudio.calculator.START_CAMERA";
     public static final String SCREEN="com.privacystudio.calculator.START_SCREEN";
@@ -53,7 +53,7 @@ public class RecorderService extends Service {
     private static final String TAG="VideoRecorder";
     private static final String PREFS="video_recorder_state_v4";
     private static final int NOTIFY_ID=2401;
-    private static final long IDLE_MS=20L*60L*1000L;
+    private static final long IDLE_MS=90L*60L*1000L;
     private static volatile RecorderService instance;
     private static volatile boolean active=false;
     private static volatile boolean preparing=false;
@@ -61,7 +61,10 @@ public class RecorderService extends Service {
     private static volatile String currentMode="camera";
     private final Handler handler=new Handler(Looper.getMainLooper());
     private final ExecutorService io=Executors.newSingleThreadExecutor();
-    private volatile long lastInteraction=0;
+    // Monotonic timestamp when the user last left the app. Zero means app is visible.
+    // Keep this independent of recording start: no timeout while the UI is on screen.
+    private volatile long backgroundSince=0;
+    private volatile boolean appInForeground=true;
     private MediaRecorder recorder;
     private CameraDevice camera;
     private CameraCaptureSession cameraSession;
@@ -79,8 +82,9 @@ public class RecorderService extends Service {
         if(preparing&&preparingSince>0 && SystemClock.elapsedRealtime()-preparingSince>20000){
             setError("Kamera/ekran nije započeo snimanje u roku od 20 sekundi",null);
             finish();
-        } else if((active||preparing)&&lastInteraction>0 && SystemClock.elapsedRealtime()-lastInteraction>=IDLE_MS){
-            Log.i(TAG,"Stop: 20 min inactivity");finish();
+        } else if((active||preparing)&&!appInForeground&&backgroundSince>0
+                && SystemClock.elapsedRealtime()-backgroundSince>=IDLE_MS){
+            Log.i(TAG,"Stop: 90 minutes outside the application");finish();
         }
         if(active||preparing)handler.postDelayed(this,5000);
     }};
@@ -100,7 +104,12 @@ public class RecorderService extends Service {
             File dir=new File(c.getFilesDir(),"capture_pending");
             File[] files=dir.listFiles((d,name)->name.endsWith(".tmp"));
             o.put("unprocessedFiles",files==null?0:files.length);
-            if(instance!=null)o.put("idleSecondsLeft",Math.max(0,(IDLE_MS-(SystemClock.elapsedRealtime()-instance.lastInteraction))/1000));
+            if(instance!=null){
+                RecorderService s=instance;
+                long remaining=s.appInForeground||s.backgroundSince<=0?IDLE_MS:
+                    Math.max(0,IDLE_MS-(SystemClock.elapsedRealtime()-s.backgroundSince));
+                o.put("idleSecondsLeft",remaining/1000);
+            }
         }catch(Exception ignored){}return o;
     }
     private void setError(String message,Throwable cause){
@@ -114,8 +123,22 @@ public class RecorderService extends Service {
             .apply();
     }
     public static boolean busy(){return active||preparing||(instance!=null&&instance.finishing);}
-    public static void userInteracted(){RecorderService s=instance;if(s!=null)s.lastInteraction=SystemClock.elapsedRealtime();}
-    public static void appVisible(boolean visible){RecorderService s=instance;if(s!=null&&visible)s.lastInteraction=SystemClock.elapsedRealtime();}
+    public static void userInteracted(){
+        RecorderService s=instance;
+        // Only actual interaction in our visible UI can reset the background countdown.
+        if(s!=null&&(MainActivity.isShowing()||PreviewActivity.isShowing()))appVisible(true);
+    }
+    public static void appVisible(boolean visible){
+        RecorderService s=instance;
+        if(s==null)return;
+        if(visible){
+            s.appInForeground=true;
+            s.backgroundSince=0;
+        }else if(s.appInForeground||s.backgroundSince<=0){
+            s.appInForeground=false;
+            s.backgroundSince=SystemClock.elapsedRealtime();
+        }
+    }
     @Override public void onCreate(){
         super.onCreate();instance=this;makeChannel();
         // Preserve orphan temporary files: they may contain recoverable MP4s.
@@ -133,7 +156,9 @@ public class RecorderService extends Service {
         recorderHadError=false;
         preparing=true;preparingSince=SystemClock.elapsedRealtime();
         currentMode=CAMERA.equals(action)?"camera":"screen";
-        startedAt=System.currentTimeMillis();lastInteraction=SystemClock.elapsedRealtime();
+        startedAt=System.currentTimeMillis();
+        appInForeground=MainActivity.isShowing()||PreviewActivity.isShowing();
+        backgroundSince=appInForeground?0:SystemClock.elapsedRealtime();
         lens=intent.getStringExtra("lens")==null?"back":intent.getStringExtra("lens");
         generation++;
         try{
@@ -350,7 +375,8 @@ public class RecorderService extends Service {
     }
     private void stopForegroundSafe(){if(foregoundShown){if(Build.VERSION.SDK_INT>=24)stopForeground(STOP_FOREGROUND_REMOVE);else stopForeground(true);foregoundShown=false;}}
     @Override public void onTaskRemoved(Intent rootIntent){
-        // Task swipe does not stop a running foreground capture; app return resets the inactivity timer.
+        // Swiping the task away counts as leaving the app, not as an immediate stop.
+        appVisible(false);
         super.onTaskRemoved(rootIntent);
     }
     @Override public void onDestroy(){
