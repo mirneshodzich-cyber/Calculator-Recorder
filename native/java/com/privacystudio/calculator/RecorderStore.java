@@ -15,10 +15,13 @@ import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.FilterInputStream;
+import java.io.IOException;
 import java.io.OutputStream;
 import java.io.DataInputStream;
 import java.security.KeyStore;
@@ -38,7 +41,11 @@ public final class RecorderStore {
     // Every RecorderStore instance must serialize index updates on the same lock.
     private static final Object INDEX_LOCK = new Object();
     private static final String KEY_NAME = "private_video_vault_key_v1";
-    private static final byte[] MAGIC = new byte[]{'S','V','R','1'};
+    private static final byte[] MAGIC_V1 = new byte[]{'S','V','R','1'};
+    // SVR2: independent authenticated blocks, fixed-size memory and cancellable reads.
+    // Previously saved SVR1 recordings are still supported and never rewritten.
+    private static final byte[] MAGIC_V2 = new byte[]{'S','V','R','2'};
+    private static final int CHUNK_BYTES = 256 * 1024;
     private final Context context;
     private final File vault;
     private final File previews;
@@ -129,16 +136,30 @@ public final class RecorderStore {
         String id=UUID.randomUUID().toString();
         File destination=encryptedFile(id);
         File temp=new File(vault,id+".incomplete");
-        Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");
-        // AndroidKeyStore forbids caller-supplied IVs during ENCRYPT_MODE.
-        // Let the provider generate a fresh IV, then persist it in the SVR1 header.
-        cipher.init(Cipher.ENCRYPT_MODE,key());
-        byte[] iv=cipher.getIV();
-        if(iv==null||iv.length!=12)
-            throw new java.security.GeneralSecurityException("AndroidKeyStore nije vratio 12-bajtni GCM IV");
-        try(OutputStream outer=new BufferedOutputStream(new FileOutputStream(temp));InputStream in=new BufferedInputStream(new FileInputStream(raw))){
-            outer.write(MAGIC);outer.write(iv);
-            try(CipherOutputStream encrypted=new CipherOutputStream(outer,cipher)){copy(in,encrypted);}
+        // Each block has its own AndroidKeyStore-generated IV and authentication tag.
+        // Unlike a monolithic GCM stream, even large recordings use bounded memory.
+        try(DataOutputStream outer=new DataOutputStream(new BufferedOutputStream(new FileOutputStream(temp)));
+            InputStream in=new BufferedInputStream(new FileInputStream(raw))){
+            outer.write(MAGIC_V2);
+            final long originalSize=raw.length();
+            outer.writeLong(originalSize);
+            SecretKey secret=key();
+            byte[] chunk=new byte[CHUNK_BYTES];
+            int bytesRead;
+            long blockNumber=0;
+            while((bytesRead=readChunk(in,chunk))>0){
+                Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");
+                cipher.init(Cipher.ENCRYPT_MODE,secret);
+                byte[] iv=cipher.getIV();
+                if(iv==null||iv.length!=12)throw new java.security.GeneralSecurityException("Neispravan Android Keystore IV");
+                cipher.updateAAD(chunkAad(blockNumber,originalSize,bytesRead));
+                byte[] encrypted=cipher.doFinal(chunk,0,bytesRead);
+                outer.writeInt(bytesRead);
+                outer.write(iv);
+                outer.write(encrypted);
+                blockNumber++;
+            }
+            outer.flush();
         }catch(Exception e){temp.delete();throw e;}
         String name=("screen".equals(type)?"SCREEN_":"CAM_")+new java.text.SimpleDateFormat("yyyy-MM-dd_HH-mm-ss",java.util.Locale.ROOT).format(new java.util.Date(createdAt))+".mp4";
         JSONObject record=new JSONObject();record.put("id",id);record.put("name",name);record.put("type",type);record.put("lens",lens);record.put("durationSec",duration);record.put("createdAt",createdAt);record.put("width",width);record.put("height",height);record.put("sizeBytes",raw.length());
@@ -150,29 +171,107 @@ public final class RecorderStore {
         }
         return record;
     }
-    private void decryptTo(String id,OutputStream out)throws Exception {
-        find(id);File input=encryptedFile(id);
+    /** Reports encrypted input bytes consumed; may throw IOException to cancel safely. */
+    public interface TransferProgress {
+        void onProgress(long processedBytes, long totalBytes) throws IOException;
+    }
+    private static int readChunk(InputStream input,byte[] buffer)throws IOException {
+        int count=0;
+        while(count<buffer.length){
+            int n=input.read(buffer,count,buffer.length-count);
+            if(n<0)break;
+            if(n==0)continue;
+            count+=n;
+        }
+        return count;
+    }
+    private static byte[] chunkAad(long index,long total,int length){
+        java.nio.ByteBuffer aad=java.nio.ByteBuffer.allocate(8+8+4);
+        return aad.putLong(index).putLong(total).putInt(length).array();
+    }
+    private static void report(TransferProgress progress,long done,long total)throws IOException {
+        if(progress!=null)progress.onProgress(done,Math.max(1,total));
+    }
+    private void decryptTo(String id,OutputStream out,TransferProgress progress)throws Exception {
+        find(id);
+        File input=encryptedFile(id);
         if(!input.exists())throw new IllegalArgumentException("Šifrirani snimak ne postoji.");
         try(DataInputStream in=new DataInputStream(new BufferedInputStream(new FileInputStream(input)))){
             byte[] magic=new byte[4];in.readFully(magic);
-            if(!java.util.Arrays.equals(magic,MAGIC))throw new IllegalArgumentException("Neispravan format datoteke.");
-            byte[] iv=new byte[12];in.readFully(iv);
-            Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");
-            cipher.init(Cipher.DECRYPT_MODE,key(),new GCMParameterSpec(128,iv));
-            try(CipherInputStream plain=new CipherInputStream(in,cipher)){copy(plain,out);}
+            if(java.util.Arrays.equals(magic,MAGIC_V2)){
+                // 4-byte MAGIC + 8-byte plaintext length, then authenticated
+                // chunks [length (4), IV (12), ciphertext + GCM tag (length+16)].
+                final long originalSize=in.readLong();
+                if(originalSize<1)throw new IOException("Neispravna izvorna dužina datoteke.");
+                long total=Math.max(1L,input.length()-12L);
+                long processed=0,decoded=0,blockNumber=0;
+                report(progress,0,total);
+                SecretKey secret=key();
+                byte[] head=new byte[3];
+                while(true){
+                    report(progress,processed,total);
+                    int first=in.read();
+                    if(first<0)break;
+                    in.readFully(head);
+                    int length=((first&255)<<24)|((head[0]&255)<<16)|((head[1]&255)<<8)|(head[2]&255);
+                    if(length<1||length>CHUNK_BYTES)throw new IOException("Oštećen blok šifriranog snimka.");
+                    byte[] iv=new byte[12];in.readFully(iv);
+                    byte[] ciphertext=new byte[length+16];in.readFully(ciphertext);
+                    Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");
+                    cipher.init(Cipher.DECRYPT_MODE,secret,new GCMParameterSpec(128,iv));
+                    cipher.updateAAD(chunkAad(blockNumber,originalSize,length));
+                    byte[] clear=cipher.doFinal(ciphertext);
+                    if(clear.length!=length)throw new IOException("Neispravna dužina dešifriranog bloka.");
+                    report(progress,processed,total);
+                    out.write(clear);
+                    processed+=4L+12L+ciphertext.length;
+                    decoded+=clear.length;
+                    blockNumber++;
+                    if(decoded>originalSize)throw new IOException("Višak podataka u šifriranom snimku.");
+                    report(progress,processed,total);
+                }
+                if(processed!=total||decoded!=originalSize)
+                    throw new IOException("Nepotpuna ili izmijenjena šifrirana datoteka.");
+                report(progress,total,total);
+            }else if(java.util.Arrays.equals(magic,MAGIC_V1)){
+                // Legacy v1 format. Explicit small reads allow native progress and
+                // cancellation even if the provider withholds output until GCM final.
+                byte[] iv=new byte[12];in.readFully(iv);
+                Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");
+                cipher.init(Cipher.DECRYPT_MODE,key(),new GCMParameterSpec(128,iv));
+                long total=Math.max(1L,input.length()-16L);
+                long processed=0;
+                byte[] block=new byte[64*1024];
+                report(progress,0,total);
+                int n;
+                while((n=in.read(block))!=-1){
+                    report(progress,processed,total);
+                    byte[] plain=cipher.update(block,0,n);
+                    if(plain!=null&&plain.length>0)out.write(plain);
+                    processed+=n;
+                    report(progress,processed,total);
+                }
+                report(progress,processed,total);
+                byte[] finalBytes=cipher.doFinal();
+                if(finalBytes!=null&&finalBytes.length>0)out.write(finalBytes);
+                report(progress,total,total);
+            }else throw new IllegalArgumentException("Nepoznat format šifriranog snimka.");
+            out.flush();
         }
     }
-    public synchronized File preview(String id)throws Exception {
+    public synchronized File preview(String id)throws Exception {return preview(id,null);}
+    public synchronized File preview(String id,TransferProgress progress)throws Exception {
         purgePreviews();
         File file=new File(previews,"view_"+id+".mp4");
-        try(OutputStream out=new BufferedOutputStream(new FileOutputStream(file))){decryptTo(id,out);}
+        try(OutputStream out=new BufferedOutputStream(new FileOutputStream(file))){decryptTo(id,out,progress);}
         catch(Exception e){file.delete();throw e;}
         if(file.length()<1024L){file.delete();throw new java.io.IOException("Dešifrirani video je prazan.");}
         return file;
     }
     public synchronized void purgePreviews(){File[] files=previews.listFiles();if(files!=null)for(File f:files)f.delete();}
     /** Stream the original decoded bytes into MediaStore; no re-encoding or transcoding. */
-    public synchronized String export(String id)throws Exception {
+    public synchronized String export(String id)throws Exception {return export(id,null);}
+    public synchronized String export(String id,TransferProgress progress)throws Exception {
         JSONObject r=find(id);String name=r.getString("name");
         if(Build.VERSION.SDK_INT<29)throw new UnsupportedOperationException("Izvoz preko MediaStore zahtijeva Android 10+.");
         ContentValues meta=new ContentValues();meta.put(MediaStore.MediaColumns.DISPLAY_NAME,name);
@@ -184,8 +283,9 @@ public final class RecorderStore {
         try{
             try(OutputStream out=context.getContentResolver().openOutputStream(uri,"w")){
                 if(out==null)throw new IllegalStateException("Nema izlaznog toka za izvoz.");
-                decryptTo(id,out);
+                decryptTo(id,out,progress);
             }
+            if(progress!=null)progress.onProgress(Math.max(1L,encryptedFile(id).length()-16L),Math.max(1L,encryptedFile(id).length()-16L));
             ContentValues ready=new ContentValues();ready.put(MediaStore.MediaColumns.IS_PENDING,0);
             int published=context.getContentResolver().update(uri,ready,null,null);
             if(published<1)throw new java.io.IOException("Galerija nije potvrdila objavu MP4 snimka.");
@@ -240,6 +340,32 @@ public final class RecorderStore {
         out.put("indexedCount",repairIndex().length());
         out.put("usableBytes",context.getFilesDir().getUsableSpace());
         return out;
+    }
+    /** Delete exactly one encrypted recording after its index entry is removed.
+     * Exported gallery copies, if any, are intentionally unaffected.
+     */
+    public void deleteOne(String id)throws Exception {
+        if(id==null||!id.matches("[A-Za-z0-9_-]{1,96}"))throw new IllegalArgumentException("Neispravan ID snimka.");
+        synchronized(INDEX_LOCK){
+            JSONArray records=repairIndex();
+            JSONArray next=new JSONArray();
+            boolean exists=false;
+            for(int i=0;i<records.length();i++){
+                JSONObject record=records.getJSONObject(i);
+                if(id.equals(record.optString("id")))exists=true;
+                else next.put(record);
+            }
+            if(!exists)throw new IllegalArgumentException("Snimak ne postoji u sefu.");
+            // Keep the encrypted file in place until metadata is durably saved.
+            // If deletion fails, repairIndex will safely rediscover the file.
+            writeIndex(next);
+            File stored=encryptedFile(id);
+            if(stored.exists()&&!stored.delete())
+                throw new IOException("Nije moguće obrisati šifrirani fajl. Pokušaj ponovo.");
+            File cached=new File(previews,"view_"+id+".mp4");
+            if(cached.exists()&&!cached.delete())
+                android.util.Log.w("RecorderStore","Could not remove expired preview for deleted record");
+        }
     }
     public synchronized void deleteAll()throws Exception {
         JSONArray all=readIndex();

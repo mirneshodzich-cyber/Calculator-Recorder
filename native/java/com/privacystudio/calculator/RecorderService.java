@@ -322,56 +322,67 @@ public class RecorderService extends Service {
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,recorder.getSurface(),null,handler);
         recorder.start();active=true;preparing=false;startedAt=System.currentTimeMillis();
     }
+    /** Keep the UI/main looper responsive while MediaRecorder finalizes a large MP4.
+     * The foreground service remains alive until encryption and index save finish.
+     */
     private void finish(){
         if(finishing)return;
         finishing=true;generation++;
         handler.removeCallbacks(watchdog);
-        boolean hadVideo=active;active=false;preparing=false;
+        final boolean wasRecording=active;
+        active=false;preparing=false;
         final long when=startedAt;
         final String type=currentMode;
         final String usedLens=lens;
         final int w=frameWidth,h=frameHeight;
-        File pending=rawFile;rawFile=null;
-        if(cameraSession!=null){try{cameraSession.stopRepeating();}catch(Exception ignored){}}
-        // Finalize MP4 while camera/display surfaces are still available.
-        if(recorder!=null){
-            try{if(hadVideo)recorder.stop();}
-            catch(RuntimeException e){hadVideo=false;setError("MP4 nije moguće završiti; pokušaj snimati barem 5 sekundi",e);}
-            try{recorder.reset();recorder.release();}catch(Exception ignored){}recorder=null;
-        }
-        if(cameraSession!=null){try{cameraSession.close();}catch(Exception ignored){}cameraSession=null;}
-        if(camera!=null){try{camera.close();}catch(Exception ignored){}camera=null;}
-        if(virtualDisplay!=null){virtualDisplay.release();virtualDisplay=null;}
-        MediaProjection previousProjection=projection;projection=null;
-        if(previousProjection!=null){try{previousProjection.stop();}catch(Exception ignored){}}
-        final boolean valid=hadVideo;final long sec=Math.max(1,(System.currentTimeMillis()-when)/1000);
-        final long bytes=(pending!=null&&pending.exists())?pending.length():0;
-        getSharedPreferences(PREFS,MODE_PRIVATE).edit()
-                .putLong("lastAttemptAt",System.currentTimeMillis()).putLong("lastRawBytes",bytes).apply();
-        if(pending!=null&&pending.exists()&&bytes>1024&&valid){
-            io.execute(()->{
-                try{
-                    // A successful MediaRecorder.stop() alone does not prove there is a playable track.
-                    // Keep broken MP4s for diagnostics; never publish them as valid vault entries.
-                    MediaMetadataRetriever probe=new MediaMetadataRetriever();
+        final File pending=rawFile;rawFile=null;
+        final MediaRecorder sessionRecorder=recorder;recorder=null;
+        final CameraCaptureSession session=cameraSession;cameraSession=null;
+        final CameraDevice device=camera;camera=null;
+        final VirtualDisplay display=virtualDisplay;virtualDisplay=null;
+        final MediaProjection previousProjection=projection;projection=null;
+        try{if(session!=null)session.stopRepeating();}catch(Exception ignored){}
+        io.execute(()->{
+            boolean valid=wasRecording;
+            try{
+                // MediaRecorder.stop can block while flushing MP4. Never do this
+                // on the main looper: it previously froze Stop and other buttons.
+                if(sessionRecorder!=null){
+                    try{if(wasRecording)sessionRecorder.stop();}
+                    catch(RuntimeException e){valid=false;setError("MP4 nije moguće završiti; snimaj barem 5 sekundi",e);}
+                    try{sessionRecorder.reset();sessionRecorder.release();}catch(Exception ignored){}
+                }
+                // Close camera/projection resources after finalization.
+                handler.post(()->{
+                    if(session!=null){try{session.close();}catch(Exception ignored){}}
+                    if(device!=null){try{device.close();}catch(Exception ignored){}}
+                    if(display!=null){try{display.release();}catch(Exception ignored){}}
+                    if(previousProjection!=null){try{previousProjection.stop();}catch(Exception ignored){}}
+                });
+                final long sec=Math.max(1,(System.currentTimeMillis()-when)/1000);
+                final long bytes=(pending!=null&&pending.exists())?pending.length():0;
+                getSharedPreferences(PREFS,MODE_PRIVATE).edit()
+                    .putLong("lastAttemptAt",System.currentTimeMillis())
+                    .putLong("lastRawBytes",bytes).apply();
+                if(pending!=null&&pending.exists()&&bytes>1024&&valid){
                     try{
-                        probe.setDataSource(pending.getAbsolutePath());
-                        if(!"yes".equalsIgnoreCase(probe.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)))
-                            throw new IllegalStateException("MP4 nema čitljiv video zapis (možda kodek nije podržan)");
-                    }finally{probe.release();}
-                    JSONObject record=new RecorderStore(this).encryptRecording(pending,type,usedLens,when,sec,w,h);
-                    saveSuccess(record);
-                    if(!pending.delete())Log.w(TAG,"Saved MP4 but raw file could not be deleted");
-                }catch(Exception e){
-                    setError("Video nije spremljen u sef; privremeni MP4 je sačuvan",e);
-                }finally{handler.post(()->{stopForegroundSafe();finishing=false;stopSelf();});}
-            });
-        }else{
-            if(getSharedPreferences(PREFS,MODE_PRIVATE).getString("lastError","").isEmpty())
-                setError("Snimanje nije proizvelo ispravan MP4. Provjeri dozvole i probaj 10 sekundi.",null);
-            // Keep any raw output for diagnosis / potential recovery.
-            stopForegroundSafe();finishing=false;stopSelf();
-        }
+                        MediaMetadataRetriever probe=new MediaMetadataRetriever();
+                        try{
+                            probe.setDataSource(pending.getAbsolutePath());
+                            if(!"yes".equalsIgnoreCase(probe.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)))
+                                throw new IllegalStateException("MP4 nema čitljiv video zapis");
+                        }finally{probe.release();}
+                        JSONObject record=new RecorderStore(this).encryptRecording(pending,type,usedLens,when,sec,w,h);
+                        saveSuccess(record);
+                        if(!pending.delete())Log.w(TAG,"Saved MP4 but raw copy could not be deleted");
+                    }catch(Exception e){setError("Video nije spremljen u sef; privremeni MP4 je sačuvan",e);}
+                }else if(getSharedPreferences(PREFS,MODE_PRIVATE).getString("lastError","").isEmpty()){
+                    setError("Snimanje nije proizvelo ispravan MP4; privremeni fajl je sačuvan",null);
+                }
+            }finally{
+                handler.post(()->{stopForegroundSafe();finishing=false;stopSelf();});
+            }
+        });
     }
     private void stopForegroundSafe(){if(foregoundShown){if(Build.VERSION.SDK_INT>=24)stopForeground(STOP_FOREGROUND_REMOVE);else stopForeground(true);foregoundShown=false;}}
     @Override public void onTaskRemoved(Intent rootIntent){
