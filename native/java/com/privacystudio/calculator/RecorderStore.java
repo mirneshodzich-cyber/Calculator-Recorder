@@ -67,10 +67,19 @@ public final class RecorderStore {
     }
     private synchronized JSONArray readIndex()throws Exception {
         if(!index.exists())return new JSONArray();
+        byte[] all;
         try(InputStream in=new FileInputStream(index)){
-            byte[] all=new byte[(int)index.length()];int o=0,r;
+            all=new byte[(int)index.length()];int o=0,r;
             while(o<all.length&&(r=in.read(all,o,all.length-o))>0)o+=r;
-            return new JSONArray(new String(all,0,o,java.nio.charset.StandardCharsets.UTF_8));
+            if(o!=all.length)throw new java.io.IOException("Nepotpuno pročitan indeks snimaka");
+        }
+        try{return new JSONArray(new String(all,java.nio.charset.StandardCharsets.UTF_8));}
+        catch(JSONException e){
+            // Preserve the damaged index as a separate file, then recover .svr entries.
+            File backup=new File(vault,"records_damaged_"+System.currentTimeMillis()+".json");
+            if(!index.renameTo(backup))throw new java.io.IOException("Oštećen indeks; ne mogu sačuvati njegovu rezervnu kopiju",e);
+            android.util.Log.e("RecorderStore","Damaged metadata saved to "+backup.getName(),e);
+            return new JSONArray();
         }
     }
     private synchronized void writeIndex(JSONArray arr)throws Exception {
@@ -210,6 +219,22 @@ public final class RecorderStore {
         }
         JSONObject result=new JSONObject();result.put("recovered",recovered);result.put("remaining",invalid);
         return result;
+    }
+    public JSONObject diagnostics()throws Exception {
+        JSONObject out=new JSONObject();
+        File pending=new File(context.getFilesDir(),"capture_pending");
+        File[] raw=pending.listFiles((d,n)->n.startsWith("capture_")&&n.endsWith(".tmp"));
+        File[] enc=vault.listFiles((d,n)->n.endsWith(".svr"));
+        File[] incomplete=vault.listFiles((d,n)->n.endsWith(".incomplete"));
+        long pendingBytes=0;
+        if(raw!=null)for(File f:raw)pendingBytes+=f.length();
+        out.put("pendingCount",raw==null?0:raw.length);
+        out.put("pendingBytes",pendingBytes);
+        out.put("encryptedCount",enc==null?0:enc.length);
+        out.put("incompleteCount",incomplete==null?0:incomplete.length);
+        out.put("indexedCount",repairIndex().length());
+        out.put("usableBytes",context.getFilesDir().getUsableSpace());
+        return out;
     }
     public synchronized void deleteAll()throws Exception {
         JSONArray all=readIndex();

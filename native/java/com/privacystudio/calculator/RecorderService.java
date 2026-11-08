@@ -21,6 +21,9 @@ import android.hardware.camera2.params.StreamConfigurationMap;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.media.MediaRecorder;
+import android.media.MediaMetadataRetriever;
+import android.media.MediaCodecInfo;
+import android.media.MediaCodecList;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
@@ -68,10 +71,15 @@ public class RecorderService extends Service {
     private String lens="back";
     private int frameWidth=0,frameHeight=0;
     private boolean finishing=false;
+    private boolean recorderHadError=false;
+    private long preparingSince=0;
     private boolean foregoundShown=false;
     private int generation=0;
     private final Runnable watchdog=new Runnable(){@Override public void run(){
-        if((active||preparing)&&lastInteraction>0 && SystemClock.elapsedRealtime()-lastInteraction>=IDLE_MS){
+        if(preparing&&preparingSince>0 && SystemClock.elapsedRealtime()-preparingSince>20000){
+            setError("Kamera/ekran nije započeo snimanje u roku od 20 sekundi",null);
+            finish();
+        } else if((active||preparing)&&lastInteraction>0 && SystemClock.elapsedRealtime()-lastInteraction>=IDLE_MS){
             Log.i(TAG,"Stop: 20 min inactivity");finish();
         }
         if(active||preparing)handler.postDelayed(this,5000);
@@ -87,6 +95,8 @@ public class RecorderService extends Service {
             o.put("lastError",state.getString("lastError",""));
             o.put("lastSavedAt",state.getLong("lastSavedAt",0));
             o.put("lastSavedName",state.getString("lastSavedName",""));
+            o.put("lastAttemptAt",state.getLong("lastAttemptAt",0));
+            o.put("lastRawBytes",state.getLong("lastRawBytes",0));
             File dir=new File(c.getFilesDir(),"capture_pending");
             File[] files=dir.listFiles((d,name)->name.endsWith(".tmp"));
             o.put("unprocessedFiles",files==null?0:files.length);
@@ -120,12 +130,15 @@ public class RecorderService extends Service {
         if(!CAMERA.equals(action)&&!SCREEN.equals(action))return START_NOT_STICKY;
         if(active||preparing||finishing)return START_NOT_STICKY;
         getSharedPreferences(PREFS,MODE_PRIVATE).edit().putString("lastError","").apply();
-        preparing=true;currentMode=CAMERA.equals(action)?"camera":"screen";
+        recorderHadError=false;
+        preparing=true;preparingSince=SystemClock.elapsedRealtime();
+        currentMode=CAMERA.equals(action)?"camera":"screen";
         startedAt=System.currentTimeMillis();lastInteraction=SystemClock.elapsedRealtime();
         lens=intent.getStringExtra("lens")==null?"back":intent.getStringExtra("lens");
         generation++;
         try{
             startVisibleNotification(SCREEN.equals(action));
+            if(getFilesDir().getUsableSpace()<64L*1024L*1024L)throw new IllegalStateException("Premalo slobodne interne memorije (manje od 64 MB)");
             File pending=new File(getFilesDir(),"capture_pending");pending.mkdirs();
             rawFile=new File(pending,"capture_"+startedAt+".tmp");
             handler.removeCallbacks(watchdog);handler.postDelayed(watchdog,5000);
@@ -170,8 +183,46 @@ public class RecorderService extends Service {
         rec.setOrientationHint(orientation);
         if(withMic){rec.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);rec.setAudioEncodingBitRate(192000);rec.setAudioSamplingRate(48000);}
         rec.setOutputFile(rawFile.getAbsolutePath());rec.prepare();
-        rec.setOnErrorListener((mr,what,extra)->{Log.e(TAG,"MediaRecorder error "+what+" / "+extra);handler.post(this::finish);});
+        rec.setOnErrorListener((mr,what,extra)->{
+            recorderHadError=true;
+            setError("Video enkoder je prijavio grešku (kod "+what+", dodatno "+extra+")",null);
+            handler.post(this::finish);
+        });
         return rec;
+    }
+    /** Only choose Camera2 resolutions the device's H.264 encoder reports supporting.
+     *  This avoids offering 4K on devices where only the camera sensor can output 4K.
+     *  No re-encoding is introduced; the highest compatible resolution is recorded.
+     */
+    private boolean h264EncoderSupports(int width,int height){
+        try{
+            for(MediaCodecInfo info:new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos()){
+                if(!info.isEncoder())continue;
+                for(String mime:info.getSupportedTypes())if("video/avc".equalsIgnoreCase(mime)){
+                    try{
+                        MediaCodecInfo.VideoCapabilities video=info.getCapabilitiesForType(mime).getVideoCapabilities();
+                        if(video!=null&&video.areSizeAndRateSupported(width,height,30.0))return true;
+                    }catch(Exception ignored){}
+                }
+            }
+        }catch(Exception e){Log.w(TAG,"Cannot inspect encoder capabilities",e);}
+        return false;
+    }
+    private int compatibleH264Bitrate(int width,int height,int requested){
+        int supported=0;
+        try{
+            for(MediaCodecInfo info:new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos()){
+                if(!info.isEncoder())continue;
+                for(String mime:info.getSupportedTypes())if("video/avc".equalsIgnoreCase(mime)){
+                    try{
+                        MediaCodecInfo.VideoCapabilities video=info.getCapabilitiesForType(mime).getVideoCapabilities();
+                        if(video!=null&&video.areSizeAndRateSupported(width,height,30.0))
+                            supported=Math.max(supported,video.getBitrateRange().getUpper());
+                    }catch(Exception ignored){}
+                }
+            }
+        }catch(Exception ignored){}
+        return supported>0?Math.max(1000000,Math.min(requested,supported)):requested;
     }
     private void beginCamera(final int g)throws Exception{
         if(checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED)throw new SecurityException("Camera permission missing");
@@ -190,15 +241,17 @@ public class RecorderService extends Service {
         Size best=null;long score=-1;
         // Prefer the maximum 16:9 supported resolution through 4K, otherwise largest supported size.
         for(Size sz:sizes){int w=sz.getWidth(),h=sz.getHeight();if(w>3840||h>2160||w<640||h<480)continue;
+            if(!h264EncoderSupports(w,h))continue;
             long area=(long)w*h;long penalty=Math.abs(9L*w-16L*h);long sc=area*10000-penalty*30;
             if(sc>score){score=sc;best=sz;}}
-        if(best==null)best=sizes[0];
+        if(best==null)throw new IllegalStateException("Nema zajedničke rezolucije za kameru i H.264 video enkoder.");
         frameWidth=best.getWidth();frameHeight=best.getHeight();
         int sensor=characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION)==null?0:characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
         int rotation=((WindowManager)getSystemService(WINDOW_SERVICE)).getDefaultDisplay().getRotation();
         int degrees=new int[]{0,90,180,270}[rotation];
         int orientation=(sensor+(facing==CameraCharacteristics.LENS_FACING_FRONT?degrees:-degrees)+360)%360;
-        int bitrate=(frameWidth>=3000?48000000:(frameWidth>=1900?18000000:10000000));
+        int bitrate=compatibleH264Bitrate(frameWidth,frameHeight,
+                frameWidth>=3000?48000000:(frameWidth>=1900?18000000:10000000));
         boolean mic=checkSelfPermission(Manifest.permission.RECORD_AUDIO)==PackageManager.PERMISSION_GRANTED;
         recorder=recorder("camera",frameWidth,frameHeight,bitrate,orientation,mic);
         manager.openCamera(id,new CameraDevice.StateCallback(){
@@ -267,15 +320,25 @@ public class RecorderService extends Service {
         MediaProjection previousProjection=projection;projection=null;
         if(previousProjection!=null){try{previousProjection.stop();}catch(Exception ignored){}}
         final boolean valid=hadVideo;final long sec=Math.max(1,(System.currentTimeMillis()-when)/1000);
-        if(pending!=null&&pending.exists()&&pending.length()>1024&&valid){
+        final long bytes=(pending!=null&&pending.exists())?pending.length():0;
+        getSharedPreferences(PREFS,MODE_PRIVATE).edit()
+                .putLong("lastAttemptAt",System.currentTimeMillis()).putLong("lastRawBytes",bytes).apply();
+        if(pending!=null&&pending.exists()&&bytes>1024&&valid){
             io.execute(()->{
                 try{
+                    // A successful MediaRecorder.stop() alone does not prove there is a playable track.
+                    // Keep broken MP4s for diagnostics; never publish them as valid vault entries.
+                    MediaMetadataRetriever probe=new MediaMetadataRetriever();
+                    try{
+                        probe.setDataSource(pending.getAbsolutePath());
+                        if(!"yes".equalsIgnoreCase(probe.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)))
+                            throw new IllegalStateException("MP4 nema čitljiv video zapis (možda kodek nije podržan)");
+                    }finally{probe.release();}
                     JSONObject record=new RecorderStore(this).encryptRecording(pending,type,usedLens,when,sec,w,h);
                     saveSuccess(record);
                     if(!pending.delete())Log.w(TAG,"Saved MP4 but raw file could not be deleted");
                 }catch(Exception e){
-                    // Do not destroy a valid raw MP4 when index/encryption fails.
-                    setError("Šifriranje ili spremanje nije uspjelo; original je sačuvan za oporavak",e);
+                    setError("Video nije spremljen u sef; privremeni MP4 je sačuvan",e);
                 }finally{handler.post(()->{stopForegroundSafe();finishing=false;stopSelf();});}
             });
         }else{

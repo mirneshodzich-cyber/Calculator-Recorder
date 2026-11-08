@@ -24,7 +24,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 @CapacitorPlugin(name="SecureRecorder",permissions={
-        @Permission(alias="capture",strings={Manifest.permission.CAMERA,Manifest.permission.RECORD_AUDIO}),
+        @Permission(alias="capture",strings={Manifest.permission.CAMERA}),
+        @Permission(alias="audio",strings={Manifest.permission.RECORD_AUDIO}),
         @Permission(alias="notifications",strings={Manifest.permission.POST_NOTIFICATIONS})
 })
 public class SecureRecorderPlugin extends Plugin {
@@ -41,10 +42,20 @@ public class SecureRecorderPlugin extends Plugin {
     @PluginMethod public void startCamera(PluginCall call){
         if(RecorderService.busy()){call.reject("Snimanje je već aktivno.");return;}
         if(getPermissionState("capture")!=PermissionState.GRANTED){requestPermissionForAlias("capture",call,"capturePermissionResult");return;}
-        requestNotificationThenCamera(call);
+        requestOptionalMicThenCamera(call);
     }
     @PermissionCallback private void capturePermissionResult(PluginCall call){
-        if(getPermissionState("capture")!=PermissionState.GRANTED){call.reject("Potrebne su dozvole za kameru i mikrofon.");return;}
+        if(getPermissionState("capture")!=PermissionState.GRANTED){call.reject("Potrebna je dozvola za kameru. Mikrofon je opcionalan.");return;}
+        requestOptionalMicThenCamera(call);
+    }
+    private void requestOptionalMicThenCamera(PluginCall call){
+        if(getPermissionState("audio")!=PermissionState.GRANTED){
+            // If the user denies microphone, video can still record without audio.
+            requestPermissionForAlias("audio",call,"audioPermissionResult");return;
+        }
+        requestNotificationThenCamera(call);
+    }
+    @PermissionCallback private void audioPermissionResult(PluginCall call){
         requestNotificationThenCamera(call);
     }
     private void requestNotificationThenCamera(PluginCall call){
@@ -112,6 +123,16 @@ public class SecureRecorderPlugin extends Plugin {
         background.execute(()->{
             try{call.resolve(JSObject.fromJSONObject(new RecorderStore(getContext()).recoverPending()));}
             catch(Exception e){call.reject("Obnova snimaka nije uspjela: "+e.getMessage());}
+        });
+    }
+    @PluginMethod public void diagnostics(PluginCall call){
+        background.execute(()->{
+            try{
+                JSObject out=JSObject.fromJSONObject(new RecorderStore(getContext()).diagnostics());
+                out.put("lastError",RecorderService.status(getContext()).optString("lastError",""));
+                out.put("lastRawBytes",RecorderService.status(getContext()).optLong("lastRawBytes",0));
+                call.resolve(out);
+            }catch(Exception e){call.reject("Dijagnostika sefa nije uspjela: "+e.getMessage());}
         });
     }
     @PluginMethod public void deleteAll(PluginCall call){
